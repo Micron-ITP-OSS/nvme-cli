@@ -13,7 +13,9 @@
 #include "argconfig.h"
 #include "args.h"
 #include "cleanup.h"
+#include "git-version.h"
 #include "plugin.h"
+#include "plugin-loader.h"
 #include "privsep.h"
 
 static int version_cmd(struct plugin *plugin)
@@ -21,11 +23,11 @@ static int version_cmd(struct plugin *plugin)
 	struct program *prog = plugin->parent;
 
 	if (plugin->name) {
-		printf("%s %s version %s (git %s)\n",
-			prog->name, plugin->name, plugin->version, GIT_VERSION);
+		printf("%s %s version %s (git %s)\n", prog->name,
+		       plugin->name, plugin->version, git_version());
 	} else {
 		printf("%s version %s (git %s)\n",
-		       prog->name, prog->version, GIT_VERSION);
+		       prog->name, prog->version, git_version());
 	}
 	printf("libnvme version %s (git %s)\n",
 		libnvme_get_version(LIBNVME_VERSION_PROJECT),
@@ -59,7 +61,7 @@ static struct command *find_command(struct plugin *plugin, const char *name)
 	return unique ? match : NULL;
 }
 
-static struct plugin *find_extension(struct plugin *plugin, const char *name)
+static struct plugin *__find_extension(struct plugin *plugin, const char *name)
 {
 	struct plugin *extension;
 
@@ -69,6 +71,18 @@ static struct plugin *find_extension(struct plugin *plugin, const char *name)
 	}
 
 	return NULL;
+}
+
+/* The extension @name, loaded from its module when it isn't yet */
+static struct plugin *find_extension(struct plugin *plugin, const char *name)
+{
+	struct plugin *extension = __find_extension(plugin, name);
+
+	if (extension)
+		return extension;
+
+	nvme_load_plugin(name);
+	return __find_extension(plugin, name);
 }
 
 /*
@@ -119,7 +133,7 @@ static bool extension_matches(struct plugin *extension, enum ext_filter filter,
 {
 	switch (filter) {
 	case EXT_GROUP:
-		return extension->group && !strcmp(extension->group, group_title);
+		return shr_streq0(extension->group, group_title);
 	case EXT_CORE_ONLY:
 		return extension->core && !extension->group;
 	case EXT_VENDOR:
@@ -251,6 +265,10 @@ void general_help(struct plugin *plugin, char *str)
 	unsigned int padding = 15;
 	unsigned int curr_length = 0;
 	bool needs_device = false;
+
+	/* the program's help lists all plugins */
+	if (!plugin->name)
+		nvme_load_plugins();
 
 	for (i = 0; plugin->commands[i]; i++) {
 		if (plugin->commands[i]->device != COMMAND_NO_DEVICE) {
@@ -550,6 +568,9 @@ static int lookup_joined_command(int argc, char **argv, struct plugin *plugin,
 	char *str;
 	int err;
 
+	/* any plugin could match */
+	nvme_load_plugins();
+
 	for (extension = plugin->next; extension; extension = extension->next) {
 		if (!strncmp(argv[0], extension->name, strlen(extension->name)))
 			break;
@@ -671,6 +692,13 @@ int plugin_call_run(struct plugin_call *call)
 		general_help(plugin, NULL);
 		return 0;
 	case PLUGIN_ERROR:
+		if (call->str && !plugin->name &&
+		    nvme_plugin_known(call->str)) {
+			argconfig_error(
+				"plugin %s not installed: no module in %s",
+				call->str, nvme_plugin_dir());
+			return call->err;
+		}
 		if (call->str) {
 			e = shr_escape(call->str);
 			argconfig_error("invalid sub-command '%s'", e ? e : "");

@@ -43,6 +43,7 @@
 #include "args.h"
 #include "fuzz.h"
 #include "plugin.h"
+#include "plugin-loader.h"
 
 /* the fuzz backend of libmock_nvme.c */
 void mock_fuzz_input(const uint8_t *data, size_t size);
@@ -448,6 +449,8 @@ static const struct {
 		    { "--dump-type=ctlr", "--telemetry-data-area=2" },
 		    { "--dump-type=host0", "--telemetry-data-area=3" },
 		    { "--dump-type=host1,ctlr", "--telemetry-data-area=1" } } },
+	{ { "ocp", "telemetry-string-log", "--print-only" },
+	  .opts = { {}, { "--no-uuid" } } },
 };
 
 #define NR_COMMANDS ARRAY_SIZE(commands)
@@ -494,6 +497,40 @@ static void select_commands(void)
 		exit(EXIT_FAILURE);
 	}
 	free(list);
+}
+
+/*
+ * Each command is a built-in one or one of a plugin. The plugins may come
+ * from modules: without the module of a plugin of this build, its inputs
+ * would test nothing, fail instead. A command this build doesn't have
+ * stays an error, as before.
+ */
+static void check_commands(void)
+{
+	struct command **cmd;
+	struct plugin *plugin;
+	const char *name;
+	size_t i;
+	bool found;
+
+	nvme_load_plugins();
+	for (i = 0; i < NR_COMMANDS; i++) {
+		if (!selected[i])
+			continue;
+		name = commands[i].argv[0];
+		found = false;
+		for (cmd = builtin.commands; *cmd && !found; cmd++)
+			found = !strcmp((*cmd)->name, name);
+		for (plugin = builtin.next; plugin && !found;
+		     plugin = plugin->next)
+			found = !strcmp(plugin->name, name);
+		if (!found && nvme_plugin_known(name)) {
+			fprintf(stderr,
+				"no command or plugin %s (module in %s?)\n",
+				name, nvme_plugin_dir());
+			exit(EXIT_FAILURE);
+		}
+	}
 }
 
 #if defined(__has_feature)
@@ -768,6 +805,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 	(void)argv;
 	defaults = nvme_args;
 	select_commands();
+	check_commands();
 	pci_setup();
 	fw_setup();
 	return 0;

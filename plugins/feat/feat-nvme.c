@@ -1884,14 +1884,14 @@ static struct command *commands[] = {
 };
 
 static struct plugin plugin = {
-	.name = "feat",
+	.name = NVME_PLUGIN_NAME,
 	.desc = "NVMe feature extensions",
 	.version = FEAT_PLUGIN_VERSION,
 	.core = true,
 	.group = "Features",
 };
 
-static void __shr_constructor register_plugin(void)
+NVME_PLUGIN_INIT(register_plugin)
 {
 	plugin_add_group(&plugin, NULL, commands);
 	register_extension(&plugin);

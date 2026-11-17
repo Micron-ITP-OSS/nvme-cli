@@ -258,14 +258,14 @@ static struct command *commands[] = {
 };
 
 static struct plugin plugin = {
-	.name = "security",
+	.name = NVME_PLUGIN_NAME,
 	.desc = "Submit NVMe Security Send/Receive commands",
 	.version = NVME_VERSION,
 	.core = true,
 	.group = "Security & Access Control",
 };
 
-static void __shr_constructor register_plugin(void)
+NVME_PLUGIN_INIT(register_plugin)
 {
 	plugin_add_group(&plugin, NULL, commands);
 	register_extension(&plugin);

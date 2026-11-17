@@ -566,12 +566,12 @@ static struct command *commands[] = {
 };
 
 static struct plugin plugin = {
-	.name = "toshiba",
+	.name = NVME_PLUGIN_NAME,
 	.desc = "Toshiba NVME plugin",
 	.version = NVME_VERSION,
 };
 
-static void __shr_constructor register_plugin(void)
+NVME_PLUGIN_INIT(register_plugin)
 {
 	plugin_add_group(&plugin, NULL, commands);
 	register_extension(&plugin);

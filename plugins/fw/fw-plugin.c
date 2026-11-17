@@ -506,14 +506,14 @@ static struct command *commands[] = {
 };
 
 static struct plugin plugin = {
-	.name = "fw",
+	.name = NVME_PLUGIN_NAME,
 	.desc = "Manage NVMe controller firmware",
 	.version = NVME_VERSION,
 	.core = true,
 	.group = "Controller Management",
 };
 
-static void __shr_constructor register_plugin(void)
+NVME_PLUGIN_INIT(register_plugin)
 {
 	plugin_add_group(&plugin, NULL, commands);
 	register_extension(&plugin);

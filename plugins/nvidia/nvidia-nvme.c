@@ -63,12 +63,12 @@ static struct command *commands[] = {
 };
 
 static struct plugin plugin = {
-	.name = "nvidia",
+	.name = NVME_PLUGIN_NAME,
 	.desc = "NVIDIA vendor specific extensions",
 	.version = NVME_VERSION,
 };
 
-static void __shr_constructor register_plugin(void)
+NVME_PLUGIN_INIT(register_plugin)
 {
 	plugin_add_group(&plugin, NULL, commands);
 	register_extension(&plugin);

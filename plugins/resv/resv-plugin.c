@@ -442,14 +442,14 @@ static struct command *commands[] = {
 };
 
 static struct plugin plugin = {
-	.name = "resv",
+	.name = NVME_PLUGIN_NAME,
 	.desc = "Submit NVMe Reservation commands",
 	.version = NVME_VERSION,
 	.core = true,
 	.group = "I/O Commands",
 };
 
-static void __shr_constructor register_plugin(void)
+NVME_PLUGIN_INIT(register_plugin)
 {
 	plugin_add_group(&plugin, NULL, commands);
 	register_extension(&plugin);

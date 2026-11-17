@@ -102,14 +102,14 @@ static struct command *commands[] = {
 };
 
 static struct plugin plugin = {
-	.name = "config",
+	.name = NVME_PLUGIN_NAME,
 	.desc = "NVMeoF connection configuration",
 	.version = NVME_VERSION,
 	.core = true,
 	.group = "Fabrics",
 };
 
-static void __shr_constructor register_plugin(void)
+NVME_PLUGIN_INIT(register_plugin)
 {
 	plugin_add_group(&plugin, NULL, commands);
 	register_extension(&plugin);

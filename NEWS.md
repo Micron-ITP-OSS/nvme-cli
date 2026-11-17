@@ -29,6 +29,17 @@
   disconnected only with `--owner` of its owner, or with `--force`. A
   controller without an owner is disconnected as before.
 
+* The JSON output keeps integers past 32 bits. Before, a 48 or 64 bit
+  counter above 2^31 - 1 came out truncated, and an unsigned 32 bit
+  value above 2^31 - 1 came out negative, such as the counters of
+  `nvme intel smart-log-add`.
+
+### Plugins
+
+* The normal output of `nvme seagate vs-temperature-stats` prints a
+  temperature below 0 C as negative. Before, -10 C came out as
+  4294967286 C.
+
 ### Build
 
 * On Linux, nvme loads libarchive when a vendor plugin creates a log
@@ -37,6 +48,17 @@
   carries nvme. Packages can make libarchive a weak dependency; without
   it, only the archive options fail. nvme declares it in an ELF
   `.note.dlopen` note. Static builds, FreeBSD and Windows still link it.
+
+* The plugins are modules, which nvme loads when a command uses them:
+  a command loads at most the module of its plugin, so nvme starts as
+  fast as before. They are installed in
+  `<libdir>/nvme-cli/<version>/plugins`. Without the module of a
+  plugin, `nvme <plugin>` says the plugin is not installed, so packages
+  can ship plugins on their own. The new `plugin-modules` option
+  (`auto` by default) decides; static builds, Windows and fuzz builds
+  link the plugins in, as before. An initramfs which runs a plugin
+  command needs its module, e.g. `nbft.so` for `nvme nbft show`. See
+  [BUILDING.md](Documentation/BUILDING.md).
 
 ### Fabrics
 

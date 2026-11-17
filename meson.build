@@ -173,29 +173,39 @@ std_prefix = prefixdir == '/usr' or prefixdir == '/usr/local'
 conf = configuration_data()
 requires = ''
 
+# The git version of the source tree. vcs_tag() runs git describe on
+# every build and rewrites its output only when the version changed, so
+# a new commit rebuilds only the files which print it. Without .git, a
+# tarball maybe inside another repository, it is the project version.
 version_tag = get_option('version-tag')
-if version_tag != ''
-    git_version = version_tag
-else
-    git_version = meson.project_version()
-
+git_version = version_tag != '' ? version_tag : meson.project_version()
+git_describe = []
+if version_tag == ''
     git = find_program('git', required: false)
     if git.found() and fs.exists(meson.current_source_dir() / '.git')
-        r = run_command(
-            git,
-            '-C', meson.current_source_dir(),
-            'describe',
-            '--abbrev=7',
-            '--dirty=+',
-            check: false,
-        )
-
-        if r.returncode() == 0
-            git_version = r.stdout().strip().replace('^v', '')
-        endif
+        # --always: the commit of a clone without tags
+        git_describe = [git, '-C', meson.current_source_dir(), 'describe',
+                        '--always', '--abbrev=7', '--dirty=+']
     endif
 endif
-conf.set('GIT_VERSION', '"@0@"'.format(git_version))
+
+# git-version.h.in with @GIT_VERSION@ replaced; libnvme/libnvme3 does the
+# same for the Python package
+if git_describe.length() > 0
+    git_version_h = vcs_tag(
+        input: 'git-version.h.in',
+        output: 'git-version.h',
+        command: git_describe,
+        fallback: git_version,
+        replace_string: '@GIT_VERSION@',
+    )
+else
+    git_version_h = configure_file(
+        input: 'git-version.h.in',
+        output: 'git-version.h',
+        configuration: {'GIT_VERSION': git_version},
+    )
+endif
 
 conf.set('SYSCONFDIR', '"@0@"'.format(sysconfdir))
 conf.set('VENDOR_USR_DIR', '"@0@"'.format(vendorusrdir))
@@ -636,9 +646,27 @@ conf.set(
 )
 
 project_config_file = 'nvme-config.h'
+# Plugin modules need dlopen() and a dynamic build. The fuzz targets link
+# the plugins in.
+want_plugin_modules = get_option('plugin-modules') \
+    .disable_auto_if(get_option('fuzzing')) \
+    .require(host_system != 'windows' and not is_static,
+             error_message: 'plugin modules need a dynamic non-Windows build') \
+    .require(not get_option('fuzzing'),
+             error_message: 'the fuzz targets link the plugins in') \
+    .allowed()
+plugin_module_dir = prefixdir / get_option('libdir') / 'nvme-cli' / \
+    meson.project_version() / 'plugins'
+conf.set10('NVME_PLUGIN_MODULES', want_plugin_modules)
+conf.set_quoted('NVME_PLUGIN_DIR', plugin_module_dir)
+# The interface between nvme and its modules: the release, and the
+# structures nvme reads from a module
+conf.set_quoted('NVME_PLUGIN_ABI', '@0@-@1@'.format(meson.project_version(),
+    fs.hash(meson.project_source_root() / 'src' / 'plugin.h', 'sha256')))
+
 nvme_config_h = configure_file(output: project_config_file, configuration: conf)
 config_dep = declare_dependency(
-    sources: nvme_config_h,
+    sources: [nvme_config_h, git_version_h],
     include_directories: '.',
 )
 
@@ -762,10 +790,8 @@ subdir('shared')    # declares: shared_dep
 subdir('libnvme')   # declares: libnvme_dep
 
 if want_nvme
-    subdir('plugins')   # declares: plugin_sources
+    subdir('plugins')   # declares: plugin_libs
     subdir('src')       # declares: sources
-
-    sources += plugin_sources
 
     link_args_list = []
     link_deps = [
@@ -798,15 +824,23 @@ if want_nvme
         link_args_list = ['-ldl']
     endif
 
+    # Modules take nvme's symbols from the program: all of them
+    nvme_link_whole = want_plugin_modules ? [libshared, libccan] : plugin_libs
+
     nvme_exe = executable(
         'nvme',
         sources + ['src/main.c'],
-        include_directories: 'src',
+        include_directories: ['src', plugin_names_inc],
         dependencies: link_deps,
         link_args: link_args_list,
+        link_whole: nvme_link_whole,
+        export_dynamic: want_plugin_modules,
         install: true,
         install_dir: sbindir,
     )
+
+    # What runs nvme needs the plugin modules too
+    nvme_runtime = [nvme_exe] + plugin_module_targets
 
     if host_system == 'windows' and want_libnvme and (not is_static)
         # Copy libnvme DLL next to nvme.exe so it can be found at
@@ -909,9 +943,7 @@ if want_nvme
     udev_files = {
         '65-persistent-net-nbft.rules': 'nvmf',
         '70-nvmf-keys.rules':           'nvmf-autoconnect',
-        '71-nvmf-hpe.rules':            'nvmf',
-        '71-nvmf-netapp.rules':         'nvmf',
-        '71-nvmf-vastdata.rules':       'nvmf',
+        '80-nvmf-storage_arrays.rules': 'nvmf',
     }
     if want_nvmf_autoconnect
         udev_files += {'70-nvmf-autoconnect.rules': 'nvmf-autoconnect'}
@@ -1063,6 +1095,7 @@ if want_nvme
         'core':      ', '.join(core_plugins),
         'vendor':    ', '.join(vendor_plugins),
         'disabled':  ', '.join(disabled_plugins),
+        'modules':   want_plugin_modules ? plugin_module_dir : 'no, built in',
     }
     summary(plugin_dict, section: 'Plugins')
 endif
@@ -1070,7 +1103,7 @@ endif
 c_args = get_option('c_args')
 c_link_args = get_option('c_link_args')
 conf_dict = {
-    'git version':      conf.get('GIT_VERSION'),
+    'git version':      git_describe.length() > 0 ? 'git describe at build time' : git_version,
     'CFLAGS':           c_args.length() > 0 ? ' '.join(c_args) : '(none)',
     'LDFLAGS':          c_link_args.length() > 0 ? ' '.join(c_link_args) : '(none)',
 }
