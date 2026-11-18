@@ -304,7 +304,7 @@ static char *ctrl_name_extract(const char *ctrl_name)
 		return NULL;
 
 	/* ctrl_name must start with "nvme" */
-	if (strncmp(p, "nvme", 4))
+	if (!shr_startswith(p, "nvme"))
 		return NULL;
 	p += 4;
 
@@ -571,9 +571,9 @@ libnvme_ctrl_map_lookup_by_physdrive(struct libnvme_global_ctx *ctx,
 	 * device number X from the path.
 	 */
 	num_str = drive_path;
-	if (strncmp(num_str, "\\\\.\\PhysicalDrive", 17) == 0)
+	if (shr_startswith(num_str, "\\\\.\\PhysicalDrive"))
 		num_str += 17;
-	else if (strncmp(num_str, "PhysicalDrive", 13) == 0)
+	else if (shr_startswith(num_str, "PhysicalDrive"))
 		num_str += 13;
 
 	target_num = strtoul(num_str, &endptr, 10);
@@ -952,32 +952,11 @@ char *libnvme_ctrl_map_entry_get_subsys_name(
 	return subsysname;
 }
 
-static char *copy_and_rtrim(const char *src, size_t src_size)
-{
-	char *dst;
-	size_t len = src_size;
-
-	if (!src)
-		return NULL;
-
-	while (len > 0 && isspace((unsigned char)src[len - 1]))
-		len--;
-
-	dst = malloc(len + 1);
-	if (!dst)
-		return NULL;
-
-	memcpy(dst, src, len);
-	dst[len] = '\0';
-
-	return dst;
-}
-
 char *libnvme_ctrl_map_entry_get_subnqn(const struct ctrl_map_entry *entry)
 {
 	if (!entry)
 		return NULL;
-	return copy_and_rtrim(entry->id_ctrl.subnqn,
+	return shr_buf2str(entry->id_ctrl.subnqn,
 			      sizeof(entry->id_ctrl.subnqn));
 }
 
@@ -985,21 +964,21 @@ char *libnvme_ctrl_map_entry_get_serial(const struct ctrl_map_entry *entry)
 {
 	if (!entry)
 		return NULL;
-	return copy_and_rtrim(entry->id_ctrl.sn, sizeof(entry->id_ctrl.sn));
+	return shr_buf2str(entry->id_ctrl.sn, sizeof(entry->id_ctrl.sn));
 }
 
 char *libnvme_ctrl_map_entry_get_model(const struct ctrl_map_entry *entry)
 {
 	if (!entry)
 		return NULL;
-	return copy_and_rtrim(entry->id_ctrl.mn, sizeof(entry->id_ctrl.mn));
+	return shr_buf2str(entry->id_ctrl.mn, sizeof(entry->id_ctrl.mn));
 }
 
 char *libnvme_ctrl_map_entry_get_firmware(const struct ctrl_map_entry *entry)
 {
 	if (!entry)
 		return NULL;
-	return copy_and_rtrim(entry->id_ctrl.fr, sizeof(entry->id_ctrl.fr));
+	return shr_buf2str(entry->id_ctrl.fr, sizeof(entry->id_ctrl.fr));
 }
 
 HDEVINFO libnvme_ctrl_map_entry_get_devinfo(

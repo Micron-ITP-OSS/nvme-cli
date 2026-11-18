@@ -170,7 +170,7 @@ static void show_value_names(FILE *out, const struct argconfig_opt_val *v)
 	__cleanup_free char *names = NULL;
 	size_t len = sizeof("\nNames:");
 	const struct argconfig_opt_val *n;
-	char *p;
+	size_t used = 0;
 
 	if (!v || !v->str)
 		return;
@@ -182,10 +182,10 @@ static void show_value_names(FILE *out, const struct argconfig_opt_val *v)
 	if (!names)
 		return;
 
-	p = names + snprintf(names, len, "\nNames:");
+	shr_snprintf_append(names, len, &used, "\nNames:");
 	for (n = v; n->str; n++)
-		p += snprintf(p, len - (p - names), " %s%s", n->str,
-			      n[1].str ? "," : "");
+		shr_snprintf_append(names, len, &used, " %s%s", n->str,
+				    n[1].str ? "," : "");
 
 	shr_print_word_wrapped(names, 44, 44, out);
 }
@@ -863,8 +863,8 @@ static int argconfig_parse_long(struct argconfig_parser *p, char *arg)
 
 	s = argconfig_find_long_any(p->root, name, len);
 	if (!s) {
-		bool help = len == 4 && !strncmp(name, "help", 4);
-		bool version = len == 7 && !strncmp(name, "version", 7);
+		bool help = len == 4 && shr_startswith(name, "help");
+		bool version = len == 7 && shr_startswith(name, "version");
 
 		if (help && !p->global)
 			return ARGCONFIG_HELP;

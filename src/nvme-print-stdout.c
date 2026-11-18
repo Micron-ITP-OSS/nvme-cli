@@ -827,22 +827,23 @@ static void stdout_zns_report_zone_attrs_decoded(char *buf, size_t len,
 		__u8 za, __u8 zai)
 {
 	const char * const recommended_limit[4] = {"", "1", "2", "3"};
-	int n;
+	size_t n = 0;
 
-	n = snprintf(buf, len, "%sValid", za & NVME_ZNS_ZA_ZDEV ? "" : "Not ");
+	shr_snprintf_append(buf, len, &n, "%sValid",
+			    za & NVME_ZNS_ZA_ZDEV ? "" : "Not ");
 
 	if (za & NVME_ZNS_ZA_RZR)
-		n += snprintf(buf + n, len - n,
-			      ", Reset Recommended (Limit %s)",
-			      recommended_limit[NVME_ZNS_ZAI_RZRTL(zai)]);
+		shr_snprintf_append(buf, len, &n,
+				    ", Reset Recommended (Limit %s)",
+				    recommended_limit[NVME_ZNS_ZAI_RZRTL(zai)]);
 
 	if (za & NVME_ZNS_ZA_FZR)
-		n += snprintf(buf + n, len - n,
-			      ", Finish Recommended (Limit %s)",
-			      recommended_limit[NVME_ZNS_ZAI_FZRTL(zai)]);
+		shr_snprintf_append(buf, len, &n,
+				    ", Finish Recommended (Limit %s)",
+				    recommended_limit[NVME_ZNS_ZAI_FZRTL(zai)]);
 
 	if (za & NVME_ZNS_ZA_ZFC)
-		snprintf(buf + n, len - n, ", Finished by Controller");
+		shr_snprintf_append(buf, len, &n, ", Finished by Controller");
 }
 
 static struct nvme_zns_desc *stdout_zns_report_zones_desc(void *report,
@@ -2588,7 +2589,7 @@ static void stdout_dev_full_path(struct libnvme_ns *n, char *path, size_t len)
 	struct stat st;
 
 	snprintf(path, len, "%s", libnvme_ns_get_name(n));
-	if (strncmp(path, "/dev/spdk/", 10) == 0 && stat(path, &st) == 0)
+	if (shr_startswith(path, "/dev/spdk/") && stat(path, &st) == 0)
 		return;
 
 	snprintf(path, len, "/dev/%s", libnvme_ns_get_name(n));
@@ -2613,7 +2614,7 @@ static void stdout_generic_full_path(struct libnvme_ns *n, char *path, size_t le
 	 * chardevice.
 	 */
 	snprintf(path, len, "%s", libnvme_ns_get_name(n));
-	if (strncmp(path, "/dev/spdk/", 10) == 0 && stat(path, &st) == 0)
+	if (shr_startswith(path, "/dev/spdk/") && stat(path, &st) == 0)
 		return;
 
 	if (sscanf(libnvme_ns_get_name(n), "nvme%dn%d", &instance, &head_instance) != 2)
