@@ -34,6 +34,11 @@ jobs:
   # The merge job is OFF for now: we are no longer using the 'mingw' branch.
   # To re-enable, set merge_enabled to 'true' and point merge_target_branch at
   # the integration branch.
+  #
+  # If the merge fails on conflicts, merge master into the integration branch
+  # locally, resolve them, and push the merge commit straight to that branch.
+  # Keep it a true merge (no squash or rebase) so master stays a parent and the
+  # same conflicts don't return on the next run.
   # ---------------------------------------------------------------------------
   config:
     runs-on: ubuntu-latest
