@@ -29,6 +29,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <ccan/str/str.h>
+
 #include <shared/compiler-attributes-util.h>
 #include <shared/fs-util.h>
 #include <shared/hash-util.h>
@@ -297,7 +299,7 @@ static enum excl_line_type classify_line(char *s, bool *in_excl, char **val)
 			return EXCL_LINE_JUNK;
 		}
 		*end = '\0';
-		*in_excl = !strcmp(shr_trim(s + 1), EXCL_SECTION);
+		*in_excl = streq(shr_trim(s + 1), EXCL_SECTION);
 		return EXCL_LINE_SECTION;
 	}
 
@@ -306,7 +308,7 @@ static enum excl_line_type classify_line(char *s, bool *in_excl, char **val)
 		return EXCL_LINE_IGNORE;
 	*eq = '\0';
 	key = shr_trim(s);
-	if (strcmp(key, EXCL_LINE_KEY))
+	if (!streq(key, EXCL_LINE_KEY))
 		return EXCL_LINE_IGNORE;
 	if (!*in_excl)
 		return EXCL_LINE_STRAY;
@@ -600,8 +602,7 @@ __shr_public int libnvmf_exclusion_add(struct libnvme_global_ctx *ctx,
 			fputs(line, fout);
 
 			/* Classify a scratch copy; "line" must stay intact. */
-			strncpy(parsebuf, line, sizeof(parsebuf) - 1);
-			parsebuf[sizeof(parsebuf) - 1] = '\0';
+			shr_strscpy(parsebuf, line, sizeof(parsebuf));
 			classify_line(shr_trim(parsebuf), &in_excl, &val);
 			has_section |= in_excl;
 		}
@@ -771,13 +772,12 @@ __shr_public int libnvmf_exclusion_remove(struct libnvme_global_ctx *ctx,
 		 * would otherwise clobber the trailing newline in "line" before
 		 * it gets passed through to fout.
 		 */
-		strncpy(parsebuf, line, sizeof(parsebuf) - 1);
-		parsebuf[sizeof(parsebuf) - 1] = '\0';
+		shr_strscpy(parsebuf, line, sizeof(parsebuf));
 
 		/* Everything except the entry being removed passes through. */
 		if (classify_line(shr_trim(parsebuf), &in_excl,
 				  &val) == EXCL_LINE_ENTRY &&
-		    !removed && !strcmp(val, entry))
+		    !removed && streq(val, entry))
 			removed = true; /* skip this line */
 		else
 			fputs(line, fout);

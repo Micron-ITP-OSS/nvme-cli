@@ -42,7 +42,7 @@ the default is `auto` (use if found) unless noted otherwise.
 | `json-c` | `auto` | 0.13 | `/etc/nvme/config.json` parsing; all vendor plugins; JSON output format |
 | `openssl` | `auto` | 3.0 | TLS over NVMe-TCP; host authentication. LibreSSL works if it provides `openssl/core_names.h` |
 | `keyutils` | `auto` | 1.5 | Key management for NVMe-oF authentication |
-| `libkmod` | `auto` | 5 | Loading the nvme-fabrics module when needed |
+| `libkmod` | `auto` | 5 | Loading the nvme-fabrics module when needed. On Linux, nvme loads `libkmod.so.2` before it connects or discovers and doesn't link it, so nvme doesn't depend on libkmod; packages can make it a weak dependency. Without it, nvme doesn't load the module, which then has to be loaded beforehand |
 | `libdbus` | `disabled` | | End-point discovery for NVMe-MI |
 | `liburing` | `disabled` | 2.2 | Asynchronous admin and I/O passthrough commands through io_uring |
 | `libarchive` | `auto` | | Archiving vendor plugin log captures (WDC, SanDisk, Micron, Samsung, Solidigm) as `.tar`/`.tar.gz`/`.zip`, without spawning an external `tar`/`zip` process. On Linux, nvme loads `libarchive.so.13` when it creates an archive and doesn't link it, so nvme and an initrd that carries it don't depend on libarchive; packages can make it a weak dependency. Without it, those capture subcommands fail with a clear error instead |
@@ -285,9 +285,12 @@ $ make PLUGINS=""
 ## Plugin modules
 
 The plugins are modules of their own, which nvme loads when a command
-uses them, so a command loads at most the module of its plugin. nvme
-loads all modules only for the lists of commands, `nvme help` and
-`nvme utils dump-command-metadata`, and for a command it doesn't know.
+uses them. The top-level commands live in modules too: `cmds-io` for the
+I/O commands, `cmds-fabrics` for connect and discover, `cmds-list` for
+list and top, and so on. A command loads only the module which provides
+it, and the plugins that module needs. nvme loads all modules only for
+the lists of commands, `nvme help` and `nvme utils dump-command-metadata`,
+and for a command it doesn't know.
 The `plugin-modules` option decides:
 
 ```shell
@@ -301,11 +304,16 @@ $ meson setup .build -Dplugin-modules=disabled
 | `disabled` | linked into nvme |
 
 The modules are installed in `<libdir>/nvme-cli/<version>/plugins`, with
-the `runtime` install tag. A module works only with an nvme of the same
+the `runtime` install tag. A module is named after the directory of its
+plugin, e.g. `sandisk.so` for `nvme sndk`. A module works only with an nvme of the same
 version, built with the same `src/plugin.h`: nvme ignores another one with
 a warning.
 Without the module of a plugin, `nvme <plugin>` says the plugin is not
-installed, so a distribution can package plugins on their own.
+installed, and without the module of a top-level command, nvme says the
+command is not installed. So a distribution can package plugins on their
+own. An initramfs needs the modules of the commands it runs, e.g.
+`cmds-fabrics.so` for `nvme connect-all`, `cmds-list.so` for
+`nvme list-subsys` and `cmds-nbft.so` for `nvme nbft show`.
 
 Run from the build tree, nvme takes the modules of the build tree
 (`.build/plugins`). The environment variable `NVME_PLUGIN_DIR` names

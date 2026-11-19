@@ -17,8 +17,24 @@ if python3.found()
             args: [
                 files('test_command_metadata_schema.py'),
                 nvme_exe,
-                meson.project_source_root() / 'plugins' / 'utils' / 'command-metadata-schema.json',
+                meson.project_source_root() / 'plugins' / 'cmds-utils' / 'command-metadata-schema.json',
             ],
+            depends: nvme_runtime,
+            timeout: 120,
+            suite: 'check',
+        )
+
+        # The index of the top-level commands of the plugins lists the
+        # commands each module adds.
+        test(
+            'nvme-cli - command-index',
+            python3,
+            args: [
+                files('test_command_index.py'),
+                nvme_exe,
+                want_plugin_modules ?
+                    meson.project_build_root() / 'plugins' : '-',
+            ] + plugin_command_index,
             depends: nvme_runtime,
             timeout: 120,
             suite: 'check',
@@ -119,7 +135,7 @@ if python3.found()
         args: [
             files('test_completion_fixture_schema.py'),
             meson.project_source_root() / 'completions' / 'test-command-metadata.json',
-            meson.project_source_root() / 'plugins' / 'utils' / 'command-metadata-schema.json',
+            meson.project_source_root() / 'plugins' / 'cmds-utils' / 'command-metadata-schema.json',
         ],
         timeout: 60,
         suite: 'check',

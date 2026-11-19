@@ -11,67 +11,17 @@
 
 #include <libnvme.h>
 
+#include <ccan/str/str.h>
+
 #include "nvme-print.h"
-
-struct feat_cfg {
-	__u8 feature_id;   /* enum nvme_features_id */
-	__u8 sel;          /* enum nvme_get_features_sel */
-	__u32 namespace_id;
-	__u32 cdw11;
-	__u32 cdw12;
-	__u8 uuid_index;
-	__u32 data_len;
-	bool raw_binary;
-	bool changed;
-};
-
-struct passthru_config {
-	__u8	opcode;
-	__u8	flags;
-	__u16	rsvd;
-	__u32	namespace_id;
-	__u32	data_len;
-	__u32	metadata_len;
-	__u32	cdw2;
-	__u32	cdw3;
-	__u32	cdw10;
-	__u32	cdw11;
-	__u32	cdw12;
-	__u32	cdw13;
-	__u32	cdw14;
-	__u32	cdw15;
-	char	*input_file;
-	char	*metadata;
-	bool	raw_binary;
-	bool	show_command;
-	bool	read;
-	bool	write;
-	__u8	prefill;
-	bool	latency;
-};
-
-struct nvme_get_log_args {
-	__u32 nsid;
-	bool rae;
-	__u8 lsp;
-	enum nvme_cmd_get_log_lid lid;
-	__u16 lsi;
-	enum nvme_csi csi;
-	bool ot;
-	__u8 uidx;
-	__u64 lpo;
-	void *log;
-	__u32 len;
-	__u64 *result;
-};
 
 static inline bool nvme_match_devname(char *devname, struct libnvme_ns *ns)
 {
 	struct libnvme_ctrl *c = libnvme_ns_get_ctrl(ns);
 
-	if (!strcmp(devname, libnvme_ns_get_name(ns)) ||
-	    (c && !strcmp(devname, libnvme_ctrl_get_name(c))) ||
-	    !strcmp(devname, libnvme_ns_get_generic_name(ns)))
+	if (streq(devname, libnvme_ns_get_name(ns)) ||
+	    (c && streq(devname, libnvme_ctrl_get_name(c))) ||
+	    streq(devname, libnvme_ns_get_generic_name(ns)))
 		return true;
 
 	return false;
@@ -95,7 +45,7 @@ static inline bool nvme_match_device_filter(struct libnvme_subsystem *s,
 	}
 	if (s) {
 		libnvme_subsystem_for_each_ns(s, n) {
-			if (!strcmp(devname, libnvme_ns_get_name(n)))
+			if (streq(devname, libnvme_ns_get_name(n)))
 				return true;
 		}
 	}

@@ -61,6 +61,11 @@ HAVE_JSON = os.environ.get('NVME_TEST_JSON', '1') == '1'
 # Built with libarchive, which the archive options of the vendor plugins
 # need.
 HAVE_LIBARCHIVE = os.environ.get('NVME_TEST_LIBARCHIVE', '1') == '1'
+# Built with libkmod, which nvme connect and discover use to load the
+# nvme-fabrics module.
+HAVE_LIBKMOD = os.environ.get('NVME_TEST_LIBKMOD', '1') == '1'
+# Built with the log plugin, which has the get-log command.
+HAVE_GET_LOG = os.environ.get('NVME_TEST_GET_LOG', '1') == '1'
 
 # Admin command opcodes
 OPC_GET_LOG_PAGE = 0x02
@@ -521,6 +526,31 @@ class MockTestCase(TestNVMeBase):
         """Run `nvme *args`, see run_nvme() for @kwargs."""
         return run_nvme(self.nvme_bin, self.env, self.sysfs_dir,
                         self.base_dir, *args, **kwargs)
+
+    def assertDecodedInSandbox(self, *args):
+        """Assert that `nvme *args` decodes the device data in the
+        sandbox, i.e. that it fails when it cannot fork a child."""
+        if os.geteuid() == 0:
+            self.skipTest('process limits do not apply to root')
+        wrapper = os.path.join(self.tmp, 'nvme-no-fork')
+        with open(wrapper, 'w', encoding='utf-8') as f:
+            f.write('#!/bin/sh\nulimit -u 1 || exit 99\n'
+                    'exec "$REAL_NVME" "$@"\n')
+        os.chmod(wrapper, 0o755)
+        env = dict(self.env, REAL_NVME=self.nvme_bin)
+        # starting the privsep helper needs a child process too
+        env.pop('NVME_PRIVSEP_TEST_HELPER', None)
+
+        direct = run_nvme(wrapper, dict(env, NVME_SANDBOX='0'),
+                          self.sysfs_dir, self.base_dir, *args)
+        if direct.returncode == 99:
+            self.skipTest('ulimit -u not supported')
+        self.assertOk(direct)
+        sandboxed = run_nvme(wrapper, dict(env, NVME_SANDBOX='1'),
+                             self.sysfs_dir, self.base_dir, *args)
+        self.assertEqual(sandboxed.returncode, 1)
+        self.assertIn('cannot decode the device data in the sandbox',
+                      sandboxed.stderr)
 
     def assertOk(self, result):
         """Fail unless the nvme run @result exited with 0. Returns it."""

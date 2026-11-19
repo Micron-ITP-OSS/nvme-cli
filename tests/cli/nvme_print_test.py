@@ -26,7 +26,6 @@ import random
 import re
 import struct
 import subprocess
-import unittest
 from pathlib import Path
 
 from tests.cli.nvme_mock import (CNS_CTRL, HAVE_JSON, NVME_IOCTL_ID,
@@ -159,7 +158,9 @@ _PLUGIN = [['fdp', 'configs', '-e', '1'], ['fdp', 'usage', '-e', '1'],
            ['dir', 'receive', 'NS', '-D', '0', '-O', '1'],
            ['dir', 'receive', 'NS', '-D', '1', '-O', '1'],
            ['dir', 'receive', 'NS', '-D', '1', '-O', '2', '-l', '64'],
-           ['dir', 'receive', 'NS', '-D', '1', '-O', '3']]
+           ['dir', 'receive', 'NS', '-D', '1', '-O', '3'],
+           ['rpmb', 'info'],
+           ['get-lba-status', 'NS', '-a', '2', '-m', '15']]
 _FORMATS = [[], ['-v'], ['-o', 'json'], ['-o', 'binary']]
 
 # sysfs trees captured from real systems, from the libnvme tests.
@@ -329,30 +330,15 @@ class PrintCLITest(MockTestCase):
                          [0x1000, 0x1001, 0x1002])
         self.assertEqual(''.join(entries[0]['vs_info_bin']), vsi.decode())
 
-    @unittest.skipIf(os.geteuid() == 0, 'process limits do not apply to root')
     def test_sandbox_used(self):
-        """With the sandbox, decoding needs a child process."""
-        wrapper = os.path.join(self.tmp, 'nvme-no-fork')
-        with open(wrapper, 'w', encoding='utf-8') as f:
-            f.write('#!/bin/sh\nulimit -u 1 || exit 99\n'
-                    'exec "$REAL_NVME" "$@"\n')
-        os.chmod(wrapper, 0o755)
-        env = dict(self.env, REAL_NVME=self.nvme_bin)
-        # starting the privsep helper needs a child process too
-        env.pop('NVME_PRIVSEP_TEST_HELPER', None)
+        self.assertDecodedInSandbox('log', 'smart', self.ctrl)
 
-        direct = run_nvme(wrapper, dict(env, NVME_SANDBOX='0'),
-                          self.sysfs_dir, self.base_dir,
-                          'log', 'smart', self.ctrl)
-        if direct.returncode == 99:
-            self.skipTest('ulimit -u not supported')
-        self.assertEqual(direct.returncode, 0)
-        sandboxed = run_nvme(wrapper, dict(env, NVME_SANDBOX='1'),
-                             self.sysfs_dir, self.base_dir,
-                             'log', 'smart', self.ctrl)
-        self.assertEqual(sandboxed.returncode, 1)
-        self.assertIn('cannot decode the device data in the sandbox',
-                      sandboxed.stderr)
+    def test_get_log_decoded(self):
+        # get-log -v uses the decoder of the log plugin
+        result = self.nvme('get-log', self.ctrl, '--log-id=2',
+                           '--log-len=512', '--verbose')
+        self.assertOk(result)
+        self.assertIn('Smart Log for NVME device:nvme0', result.stdout)
 
     def test_persistent_event_telemetry_log_create(self):
         # A Telemetry Log Create event holds a 512 byte Telemetry log

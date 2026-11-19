@@ -8,10 +8,10 @@
 #include <ccan/array_size/array_size.h>
 #include <ccan/endian/endian.h>
 #include <ccan/list/list.h>
+#include <ccan/str/str.h>
 
 #include "args.h"
 #include "nvme-json.h"
-#include "nvme-regs.h"
 #include <shared/int-util.h>
 #include <shared/mem-util.h>
 #include <shared/table-util.h>
@@ -42,19 +42,6 @@ typedef struct nvme_effects_log_node {
 void d(unsigned char *buf, int len, int width, int group);
 void d_raw(unsigned char *buf, unsigned len);
 
-enum nvme_cli_topo_ranking {
-	NVME_CLI_TOPO_NAMESPACE,
-	NVME_CLI_TOPO_CTRL,
-	NVME_CLI_TOPO_MULTIPATH,
-};
-
-/* How nvme_show_ctrl_registers() shows the registers */
-enum nvme_regs_style {
-	NVME_REGS_TABLE,	/* show-regs: a row for each */
-	NVME_REGS_REGISTER,	/* get-reg: "register : offset (name), value" */
-	NVME_REGS_PROPERTY,	/* get-property: "property : ..." */
-};
-
 /*
  * NPSS is a 0's based value. A device can report more power states than
  * the power state descriptor table holds.
@@ -74,27 +61,6 @@ static inline int nvme_id_ns_nr_lbaf(struct nvme_id_ns *ns)
 {
 	int max = ARRAY_SIZE(ns->lbaf);
 	int n = ns->nlbaf + ns->nulbaf + 1;
-
-	return n < max ? n : max;
-}
-
-/*
- * The bytes of the Identify Directive Return Parameters the printers
- * decode: the directives supported, enabled and persistent across
- * controller level resets.
- */
-#define NVME_DIRECTIVE_IDENTIFY_PARAM_LEN	96
-
-/*
- * The Stream Identifiers of a Streams Directive Get Status data structure
- * of @len bytes, which holds at least its Open Stream Count: the count
- * the device reports, but at most as many as fit.
- */
-static inline int nvme_streams_status_nr_sid(
-	struct nvme_streams_directive_status *status, __u32 len)
-{
-	int max = (len - sizeof(*status)) / sizeof(status->sid[0]);
-	int n = le16_to_cpu(status->osc);
 
 	return n < max ? n : max;
 }
@@ -159,337 +125,19 @@ static inline __u8 nvme_ns_id_desc_type(const struct nvme_ns_id_desc *cur)
 	return cur->nidl == len ? cur->nidt : 0;
 }
 
-/*
- * The host discovery log record at offset @off of a page of @len bytes, or
- * NULL if no whole record starts there. The page ends where its header
- * says or where the buffer ends, whichever comes first. A record must hold
- * at least its fixed part, and its length must not reach past the page.
- * The length of a record need not be a multiple of 4, so a record need not
- * be aligned: copy it before reading it.
- */
-static inline void *
-nvme_host_discovery_record(struct nvme_host_discovery_log *log, __u64 len,
-			   __u64 off)
-{
-	__u64 thdlpl = le32_to_cpu(log->thdlpl);
-	__u64 end = thdlpl < len ? thdlpl : len;
-	void *rec;
-	__u32 tel;
-
-	if (off > end ||
-	    end - off < sizeof(struct nvme_host_ext_discovery_log))
-		return NULL;
-
-	rec = (void *)log + off;
-	tel = shr_get_unaligned_le32(rec +
-		offsetof(struct nvme_host_ext_discovery_log, tel));
-	if (tel < sizeof(struct nvme_host_ext_discovery_log) ||
-	    tel > end - off)
-		return NULL;
-
-	return rec;
-}
-
-/*
- * The extended attribute at @p of the host discovery log record @rec of
- * @tel bytes, its header copied to @exat, or NULL if it, with its value,
- * doesn't fit the record.
- */
-static inline void *
-nvme_host_discovery_exat(void *rec, __u32 tel, void *p,
-			 struct nvmf_ext_attr *exat)
-{
-	void *end = rec + tel;
-
-	if (!shr_buf_has_room(p, end, sizeof(*exat)))
-		return NULL;
-	memcpy(exat, p, sizeof(*exat));
-	if (!shr_buf_has_room(p + sizeof(*exat), end,
-			      le16_to_cpu(exat->exatlen)))
-		return NULL;
-
-	return p;
-}
-
-/* The extended attribute behind the one at @p, as libnvmf_exat_ptr_next() */
-static inline void *nvme_host_discovery_exat_next(void *p,
-		const struct nvmf_ext_attr *exat)
-{
-	return p + sizeof(*exat) + ((le16_to_cpu(exat->exatlen) + 3) & ~3);
-}
-
-/*
- * The AVE discovery log record at offset @off of a page of @len bytes, or
- * NULL if no whole record starts there, as nvme_host_discovery_record().
- * The length of a record need not be a multiple of 4, so a record need not
- * be aligned: copy it before reading it.
- */
-static inline void *
-nvme_ave_discovery_record(struct nvme_ave_discovery_log *log, __u64 len,
-			  __u64 off)
-{
-	__u64 tadlpl = le32_to_cpu(log->tadlpl);
-	__u64 end = tadlpl < len ? tadlpl : len;
-	void *rec;
-	__u32 tel;
-
-	if (off > end ||
-	    end - off < sizeof(struct nvme_ave_discovery_log_entry))
-		return NULL;
-
-	rec = (void *)log + off;
-	tel = shr_get_unaligned_le32(rec +
-		offsetof(struct nvme_ave_discovery_log_entry, tel));
-	if (tel < sizeof(struct nvme_ave_discovery_log_entry) ||
-	    tel > end - off)
-		return NULL;
-
-	return rec;
-}
-
-/*
- * Return: the length of the operating system specific parameters of a pull
- * model DDC request log of @len bytes: what the header says, but no more
- * than the buffer holds.
- */
-static inline __u32
-nvme_pull_model_ddc_req_osp_len(struct nvme_pull_model_ddc_req_log *log,
-				__u64 len)
-{
-	__u64 tpdrpl = le32_to_cpu(log->tpdrpl);
-	__u64 end = tpdrpl < len ? tpdrpl : len;
-
-	if (end <= offsetof(struct nvme_pull_model_ddc_req_log, osp))
-		return 0;
-
-	return end - offsetof(struct nvme_pull_model_ddc_req_log, osp);
-}
-
-/*
- * Copy the fixed part of the reachability group descriptor at offset @off
- * of a log of @len bytes to @rgd. The descriptors differ in length, so
- * they are only 4 byte aligned. Return: false if the descriptor doesn't
- * fit with its namespace ID list, which nvme_reachability_ids() returns.
- * The next descriptor is at nvme_reachability_group_next().
- */
-static inline bool
-nvme_reachability_group(struct nvme_reachability_groups_log *log, __u64 len,
-			__u64 off, struct nvme_reachability_group_desc *rgd)
-{
-	if (off > len || len - off < sizeof(*rgd))
-		return false;
-
-	memcpy(rgd, (void *)log + off, sizeof(*rgd));
-	return le32_to_cpu(rgd->nnid) <=
-		(len - off - sizeof(*rgd)) / sizeof(rgd->nsid[0]);
-}
-
-static inline __u64
-nvme_reachability_group_next(struct nvme_reachability_group_desc *rgd,
-			     __u64 off)
-{
-	return off + sizeof(*rgd) +
-		(__u64)le32_to_cpu(rgd->nnid) * sizeof(rgd->nsid[0]);
-}
-
-/*
- * The reachability association descriptor at offset @off of a log of @len
- * bytes, as nvme_reachability_group().
- */
-static inline bool
-nvme_reachability_association(struct nvme_reachability_associations_log *log,
-			      __u64 len, __u64 off,
-			      struct nvme_reachability_association_desc *rad)
-{
-	if (off > len || len - off < sizeof(*rad))
-		return false;
-
-	memcpy(rad, (void *)log + off, sizeof(*rad));
-	return le32_to_cpu(rad->nrid) <=
-		(len - off - sizeof(*rad)) / sizeof(rad->rgid[0]);
-}
-
-static inline __u64
-nvme_reachability_association_next(
-		struct nvme_reachability_association_desc *rad, __u64 off)
-{
-	return off + sizeof(*rad) +
-		(__u64)le32_to_cpu(rad->nrid) * sizeof(rad->rgid[0]);
-}
-
-/*
- * The IDs which follow the reachability descriptor at offset @off, whose
- * fixed part is @size bytes long. They are 4 byte aligned, as they need.
- */
-static inline __le32 *nvme_reachability_ids(void *log, __u64 off, size_t size)
-{
-	return log + off + size;
-}
-
 /* Return: the LBA data size in bytes, or 0 if it is not representable. */
 static inline unsigned int nvme_lbaf_data_size(__u8 ds)
 {
 	return ds < 32 ? 1U << ds : 0;
 }
 
-static inline bool nvme_is_multipath(struct libnvme_subsystem *s)
-{
-	struct libnvme_ns *n;
-	struct libnvme_path *p;
-
-	libnvme_subsystem_for_each_ns(s, n)
-		libnvme_namespace_for_each_path(n, p)
-			return true;
-
-	return false;
-}
-
-static inline bool subsystem_iopolicy_filter(const char *name, void *arg)
-{
-	struct libnvme_subsystem *s = arg;
-	const char *iopolicy;
-
-	libnvme_subsystem_get_iopolicy(s, &iopolicy, "");
-
-	if (!strcmp(iopolicy, "queue-depth")) {
-		/* exclude "Nodes" for iopolicy queue-depth */
-		if (!strcmp(name, "Nodes"))
-			return false;
-	} else if (!strcmp(iopolicy, "numa")) {
-		/* exclude "Qdepth" for iopolicy numa */
-		if (!strcmp(name, "Qdepth"))
-			return false;
-	} else { /* round-robin */
-		/* exclude "Nodes" and "Qdepth" for iopolicy round-robin */
-		if (!strcmp(name, "Nodes") || !strcmp(name, "Qdepth"))
-			return false;
-	}
-
-	return true;
-}
-
-
-struct nvme_error_log_filter {
-	bool valid;
-	__u16 sqid;
-	__u16 status;
-	__u64 lba;
-	__u32 nsid;
-	__u8 trtype;
-	__u8 csi;
-	__u8 opcode;
-};
-
-/* config.h is fabrics-only; forward-declare so this header stays valid in a
- * -Dfabrics=disabled build.
- */
-struct libnvmf_config;
-
 struct print_ops {
 	/* libnvme types.h print functions */
-	void (*ana_log)(struct nvme_ana_log *ana_log, const char *devname, size_t len);
-	void (*boot_part_log)(void *bp_log, const char *devname, __u32 size);
-	void (*phy_rx_eom_log)(struct nvme_phy_rx_eom_log *log, __u16 controller, size_t len);
-	void (*ctrl_list)(struct nvme_ctrl_list *ctrl_list);
-	void (*ctrl_registers)(const struct nvme_reg_val *vals, unsigned int nr,
-			       enum nvme_regs_style style);
-	void (*directive)(__u8 type, __u8 oper, __u16 spec, __u32 nsid, __u64 result, void *buf, __u32 len);
-	void (*discovery_log)(const struct nvmf_discovery_log *log, int numrec);
-	void (*effects_log_list)(struct list_head *list);
-	void (*endurance_group_event_agg_log)(struct nvme_aggregate_endurance_group_event *endurance_log, __u64 log_entries, __u32 size, const char *devname);
-	void (*endurance_group_list)(struct nvme_id_endurance_group_list *endgrp_list);
-	void (*endurance_log)(struct nvme_endurance_group_log *endurance_group, __u16 group_id, const char *devname);
-	void (*error_log)(struct nvme_error_log_page *err_log, int entries,
-			  const char *devname,
-			  struct nvme_error_log_filter *flt);
-	void (*fdp_config_log)(struct nvme_fdp_config_log *log, size_t len);
-	void (*fdp_event_log)(struct nvme_fdp_events_log *log);
-	void (*fdp_ruh_status)(struct nvme_fdp_ruh_status *status, size_t len);
-	void (*fdp_stats_log)(struct nvme_fdp_stats_log *log);
-	void (*fdp_usage_log)(struct nvme_fdp_ruhu_log *log, size_t len);
-	void (*fid_supported_effects_log)(struct nvme_fid_supported_effects_log *fid_log, const char *devname);
-	void (*fw_log)(struct nvme_firmware_slot *fw_log, const char *devname);
-	void (*id_ctrl)(struct nvme_id_ctrl *ctrl, const char *product_name,
-			void (*vs)(__u8 *vs, struct json_object *root));
-	void (*id_ctrl_nvm)(struct nvme_id_ctrl_nvm *ctrl_nvm);
-	void (*id_domain_list)(struct nvme_id_domain_list *id_dom);
-	void (*id_independent_id_ns)(struct nvme_id_independent_id_ns *ns, unsigned int nsid);
-	void (*id_iocs)(struct nvme_id_iocs *ioscs);
-	void (*id_ns)(struct nvme_id_ns *ns, unsigned int nsid, unsigned int lba_index, bool cap_only);
-	void (*id_ns_descs)(void *data, unsigned int nsid);
-	void (*id_ns_granularity_list)(const struct nvme_id_ns_granularity_list *list);
-	void (*id_nvmset_list)(struct nvme_id_nvmset_list *nvmset, unsigned int nvmeset_id);
-	void (*id_uuid_list)(const struct nvme_id_uuid_list  *uuid_list);
-	void (*lba_status)(struct nvme_lba_status *list, unsigned long len);
-	void (*lba_status_log)(void *lba_status, __u32 size, const char *devname);
-	void (*media_unit_stat_log)(struct nvme_media_unit_stat_log *mus, size_t len);
-	void (*mi_cmd_support_effects_log)(struct nvme_mi_cmd_supported_effects_log *mi_cmd_log, const char *devname);
-	void (*ns_list)(struct nvme_ns_list *ns_list);
-	void (*ns_list_log)(struct nvme_ns_list *log, const char *devname, bool alloc);
-	void (*nvm_id_ns)(struct nvme_nvm_id_ns *nvm_ns, unsigned int nsid, struct nvme_id_ns *ns, unsigned int lba_index, bool cap_only);
-	void (*persistent_event_log)(void *pevent_log_info, __u8 action, __u32 size, const char *devname);
-	void (*power_meas_log)(struct nvme_power_meas_log *log, __u32 size);
-	void (*predictable_latency_event_agg_log)(struct nvme_aggregate_predictable_lat_event *pea_log, __u64 log_entries, __u32 size, const char *devname);
-	void (*predictable_latency_per_nvmset)(struct nvme_nvmset_predictable_lat_log *plpns_log, __u16 nvmset_id, const char *devname);
-	void (*primary_ctrl_cap)(const struct nvme_primary_ctrl_cap *caps);
-	void (*relatives)(struct libnvme_global_ctx *ctx, const char *name);
-	void (*resv_notification_log)(struct nvme_resv_notification_log *resv, const char *devname);
-	void (*resv_report)(struct nvme_resv_status *status, int bytes, bool eds);
-	void (*sanitize_log_page)(struct nvme_sanitize_log_page *sanitize_log, const char *devname);
-	void (*secondary_ctrl_list)(const struct nvme_secondary_ctrl_list *sc_list, __u32 count);
-	void (*select_result)(enum nvme_features_id fid, __u64 result);
-	void (*self_test_log)(struct nvme_self_test_log *self_test, __u8 dst_entries, __u32 size, const char *devname);
-	void (*smart_log)(struct nvme_smart_log *smart, unsigned int nsid, const char *devname);
-	void (*supported_cap_config_list_log)(struct nvme_supported_cap_config_list_log *cap_log, size_t len);
-	void (*supported_log_pages)(struct nvme_supported_log_pages *support_log, const char *devname);
-	void (*zns_start_zone_list)(__u64 nr_zones, struct json_object **zone_list);
-	void (*zns_changed_zone_log)(struct nvme_zns_changed_zone_log *log);
-	void (*zns_finish_zone_list)(__u64 nr_zones, struct json_object *zone_list);
-	void (*zns_id_ctrl)(struct nvme_zns_id_ctrl *ctrl);
-	void (*zns_id_ns)(struct nvme_zns_id_ns *ns, struct nvme_id_ns *id_ns);
-	void (*zns_report_zones)(void *report, __u32 descs, __u8 ext_size, __u32 report_size, struct json_object *zone_list);
-	void (*show_feature)(enum nvme_features_id fid, int sel,
-			     unsigned int result, void *buf, __u32 data_len);
-	void (*show_feature_fields)(enum nvme_features_id fid, unsigned int result, unsigned char *buf);
-	void (*id_ctrl_rpmbs)(__le32 ctrl_rpmbs);
-	void (*lba_range)(struct nvme_lba_range_type *lbrt, int nr_ranges);
-	void (*lba_status_info)(__u64 result);
 	void (*d)(unsigned char *buf, int len, int width, int group);
 	void (*show_init)(void);
 	void (*show_finish)(void);
-	void (*mgmt_addr_list_log)(struct nvme_mgmt_addr_list_log *ma_log);
-	void (*rotational_media_info_log)(struct nvme_rotational_media_info_log *info);
-	void (*dispersed_ns_psub_log)(
-		struct nvme_dispersed_ns_participating_nss_log *log, __u64 len);
-	void (*reachability_groups_log)(struct nvme_reachability_groups_log *log, __u64 len);
-	void (*reachability_associations_log)(struct nvme_reachability_associations_log *log,
-					      __u64 len);
-	void (*host_discovery_log)(struct nvme_host_discovery_log *log,
-				   __u64 len);
-	void (*ave_discovery_log)(struct nvme_ave_discovery_log *log,
-				  __u64 len);
-	void (*pull_model_ddc_req_log)(struct nvme_pull_model_ddc_req_log *log,
-				       __u64 len);
-	void (*voltage_meas_log)(struct nvme_voltage_measurement_log *log,
-				 __u32 size);
-
-	/* libnvme tree print functions */
-	void (*list_item)(struct libnvme_ns *n, struct shr_table *t);
-	void (*list_items)(struct libnvme_global_ctx *ctx);
-	void (*print_nvme_subsystem_list)(struct libnvme_global_ctx *ctx, bool show_ana);
-	void (*topology_ctrl)(struct libnvme_global_ctx *ctx);
-	void (*topology_namespace)(struct libnvme_global_ctx *ctx);
-	void (*topology_multipath)(struct libnvme_global_ctx *ctx);
-	void (*topology_tabular)(struct libnvme_global_ctx *ctx);
-
-	/* config show */
-	void (*config_conn_list)(struct libnvmf_config *config);
-
-	/* nvme top */
-	void (*top)(int refresh_interval);
 
 	/* status and error messages */
-	void (*connect_msg)(struct libnvme_ctrl *c);
 	void (*show_message)(bool error, const char *msg, va_list ap);
 	void (*show_perror)(const char *msg, va_list ap);
 	void (*show_status)(int status);
@@ -522,160 +170,68 @@ static inline struct print_ops *nvme_get_json_print_ops(nvme_print_flags_t flags
 /* A printer failed in the sandbox */
 bool nvme_show_failed(void);
 
+/*
+ * Run a printer from a plugin's printer table the same way nvme_print()
+ * runs the core printers: skip it for dry runs, and run it in the decoder
+ * sandbox if that is enabled and @sandbox is set. Pass false for printers
+ * that open files, issue commands or pass data back to the caller. See
+ * Documentation/PRIVSEP.md.
+ */
+bool nvme_print_decoder_begin(nvme_print_flags_t flags, bool sandbox);
+bool nvme_print_decoder_begin_always(nvme_print_flags_t flags, bool sandbox);
+void nvme_print_decoder_end(nvme_print_flags_t flags);
+
+#define __nvme_print_decoder(begin, ops, name, sandbox, flags, ...)	\
+	do {								\
+		typeof(ops) __ops = (ops);				\
+									\
+		if (!__ops || !__ops->name)				\
+			nvme_show_error("unhandled output format");	\
+		else if (begin(flags, sandbox)) {			\
+			__ops->name(__VA_ARGS__);			\
+			nvme_print_decoder_end(flags);			\
+		}							\
+	} while (false)
+
+#define nvme_print_decoder(ops, name, sandbox, flags, ...)		\
+	__nvme_print_decoder(nvme_print_decoder_begin, ops, name,	\
+			     sandbox, flags, ##__VA_ARGS__)
+
+/*
+ * Like nvme_print_decoder(), but run the printer for dry runs as well.
+ * A command uses it to show the fields of the value it sets.
+ */
+#define nvme_print_decoder_always(ops, name, sandbox, flags, ...)	\
+	__nvme_print_decoder(nvme_print_decoder_begin_always, ops, name, \
+			     sandbox, flags, ##__VA_ARGS__)
+
+/*
+ * Log page decoder registered by a plugin for get-log -v. ->show returns
+ * true if it decoded the log page.
+ */
+struct nvme_log_decoder {
+	bool (*show)(const char *devname, enum nvme_cmd_get_log_lid lid,
+		     __u32 nsid, __u16 lsi, __u8 lsp, void *log, __u32 len,
+		     nvme_print_flags_t flags);
+	struct nvme_log_decoder *next;
+};
+
+void nvme_register_log_decoder(struct nvme_log_decoder *dec);
+
+/* Run the registered decoders, true if one of them decoded the log page */
+bool nvme_show_log_decoded(const char *devname, enum nvme_cmd_get_log_lid lid,
+			   __u32 nsid, __u16 lsi, __u8 lsp, void *log,
+			   __u32 len, nvme_print_flags_t flags);
+
 struct print_ops *nvme_get_stdout_print_ops(nvme_print_flags_t flags);
 struct print_ops *nvme_get_binary_print_ops(nvme_print_flags_t flags);
 
-void stdout_top(int refresh_interval);
 
 void nvme_show_status(int status);
 void nvme_show_err(int err, const char *fmt, ...);
 void nvme_show_io_cmd_err(const char *msg, __u8 opcode, int err);
 void nvme_show_admin_cmd_err(const char *msg, __u8 opcode, int err);
 void nvme_show_opcode_status(int status, bool admin, __u8 opcode);
-void nvme_show_lba_status_info(__u64 result);
-void nvme_show_relatives(struct libnvme_global_ctx *ctx, const char *name, nvme_print_flags_t flags);
-
-void nvme_show_id_iocs(struct nvme_id_iocs *iocs, nvme_print_flags_t flags);
-void nvme_show_id_ctrl(struct libnvme_global_ctx *ctx,
-	struct libnvme_transport_handle *hdl, struct nvme_id_ctrl *ctrl,
-	nvme_print_flags_t flags, void (*vendor_show)(__u8 *vs,
-	struct json_object *root));
-void nvme_show_id_ctrl_rpmbs(__le32 ctrl_rpmbs, nvme_print_flags_t flags);
-void nvme_show_id_ns(struct nvme_id_ns *ns, unsigned int nsid,
-		unsigned int lba_index, bool cap_only, nvme_print_flags_t flags);
-void nvme_show_cmd_set_independent_id_ns(
-	struct nvme_id_independent_id_ns *ns, unsigned int nsid,
-	nvme_print_flags_t flags);
-void nvme_show_resv_report(struct nvme_resv_status *status, int bytes, bool eds,
-	nvme_print_flags_t flags);
-void nvme_show_lba_range(struct nvme_lba_range_type *lbrt, int nr_ranges,
-	nvme_print_flags_t flags);
-void nvme_show_supported_log(struct nvme_supported_log_pages *support,
-	const char *devname, nvme_print_flags_t flags);
-void nvme_show_error_log(struct nvme_error_log_page *err_log, int entries,
-	const char *devname, struct nvme_error_log_filter *flt,
-	nvme_print_flags_t flags);
-bool nvme_is_error_log_filter(struct nvme_error_log_page *err_log,
-			      struct nvme_error_log_filter *flt);
-void nvme_show_smart_log(struct nvme_smart_log *smart, unsigned int nsid, const char *devname,
-			 nvme_print_flags_t flags);
-void nvme_show_ana_log(struct nvme_ana_log *ana_log, const char *devname,
-		       size_t len, nvme_print_flags_t flags);
-void nvme_show_self_test_log(struct nvme_self_test_log *self_test, __u8 dst_entries,
-	__u32 size, const char *devname, nvme_print_flags_t flags);
-void nvme_show_fw_log(struct nvme_firmware_slot *fw_log, const char *devname,
-	nvme_print_flags_t flags);
-void nvme_print_effects_log_pages(struct list_head *list,
-				  nvme_print_flags_t flags);
-void nvme_show_changed_ns_list_log(struct nvme_ns_list *log, const char *devname,
-				   nvme_print_flags_t flags, bool alloc);
-void nvme_show_endurance_log(struct nvme_endurance_group_log *endurance_log,
-	__u16 group_id, const char *devname, nvme_print_flags_t flags);
-void nvme_show_sanitize_log(struct nvme_sanitize_log_page *sanitize,
-	const char *devname, nvme_print_flags_t flags);
-void nvme_show_predictable_latency_per_nvmset(
-	struct nvme_nvmset_predictable_lat_log *plpns_log,
-	__u16 nvmset_id, const char *devname, nvme_print_flags_t flags);
-void nvme_show_predictable_latency_event_agg_log(
-	struct nvme_aggregate_predictable_lat_event *pea_log,
-	__u64 log_entries, __u32 size, const char *devname,
-	nvme_print_flags_t flags);
-void nvme_show_persistent_event_log(void *pevent_log_info,
-	__u8 action, __u32 size, const char *devname,
-	nvme_print_flags_t flags);
-void nvme_show_endurance_group_event_agg_log(
-	struct nvme_aggregate_endurance_group_event *endurance_log,
-	__u64 log_entries, __u32 size, const char *devname,
-	nvme_print_flags_t flags);
-void nvme_show_lba_status_log(void *lba_status, __u32 size,
-	const char *devname, nvme_print_flags_t flags);
-void nvme_show_resv_notif_log(struct nvme_resv_notification_log *resv,
-	const char *devname, nvme_print_flags_t flags);
-void nvme_show_boot_part_log(void *bp_log, const char *devname,
-	__u32 size, nvme_print_flags_t flags);
-void nvme_show_phy_rx_eom_log(struct nvme_phy_rx_eom_log *log,
-	__u16 controller, size_t len, nvme_print_flags_t flags);
-
-/*
- * Walks the variable-length, device-reported array of EOM descriptors in a
- * phy_rx_eom_log, bounding every step against both dsize and the log
- * buffer actually allocated for it (see shr_buf_has_room()). Shared by the
- * json and stdout backends so the bounds-checking logic exists once.
- */
-struct eom_desc_iter {
-	unsigned char *p;
-	unsigned char *cur;
-	unsigned char *end;
-	uint32_t dsize;
-	uint16_t remaining;
-};
-
-static inline void eom_desc_iter_init(struct eom_desc_iter *it,
-		struct nvme_phy_rx_eom_log *log, size_t len)
-{
-	it->p = (unsigned char *)log->descs;
-	it->end = (unsigned char *)log + len;
-	it->dsize = le32_to_cpu(log->dsize);
-	it->remaining = le16_to_cpu(log->nd);
-}
-
-/*
- * Copies the fixed part of the next descriptor to @desc: dsize need not
- * keep the descriptors aligned. Returns false once the count is exhausted
- * or a descriptor no longer fits the log buffer -- a corrupt or hostile
- * dsize/nd pair gives no way to locate anything past that point, so the
- * walk stops there rather than guessing.
- */
-static inline bool eom_desc_iter_next(struct eom_desc_iter *it,
-		struct nvme_eom_lane_desc *desc)
-{
-	if (!it->remaining)
-		return false;
-
-	/*
-	 * The full stride, not just the fixed descriptor, must fit: advancing
-	 * by dsize below would otherwise form an out-of-bounds pointer.
-	 */
-	if (it->dsize < sizeof(*desc) || !shr_buf_has_room(it->p, it->end, it->dsize))
-		return false;
-
-	it->remaining--;
-	it->cur = it->p;
-	memcpy(desc, it->cur, sizeof(*desc));
-	it->p += it->dsize;
-
-	return true;
-}
-
-/* The eye data of the descriptor eom_desc_iter_next() copied last */
-static inline unsigned char *eom_desc_iter_eye(struct eom_desc_iter *it)
-{
-	return it->cur + sizeof(struct nvme_eom_lane_desc);
-}
-
-/*
- * Validates the vendor-specific eye data following the descriptor most
- * recently copied by eom_desc_iter_next() against both dsize and the log
- * buffer. Returns the data and its length via *vsdatalen, or NULL with
- * *vsdatalen == 0 if it doesn't fit.
- */
-static inline unsigned char *eom_desc_iter_vsdata(struct eom_desc_iter *it,
-		const struct nvme_eom_lane_desc *desc, uint16_t *vsdatalen)
-{
-	uint16_t nrows = le16_to_cpu(desc->nrows);
-	uint16_t ncols = le16_to_cpu(desc->ncols);
-	uint16_t edlen = le16_to_cpu(desc->edlen);
-	size_t vsdataoffset = (size_t)nrows * ncols + sizeof(*desc);
-
-	if (vsdataoffset > it->dsize || edlen > it->dsize - vsdataoffset ||
-	    !shr_buf_has_room(it->cur, it->end, vsdataoffset + edlen)) {
-		*vsdatalen = 0;
-		return NULL;
-	}
-
-	*vsdatalen = edlen;
-	return it->cur + vsdataoffset;
-}
 
 /*
  * The Metadata Element Descriptor at offset *@off of a Host Metadata data
@@ -706,205 +262,14 @@ nvme_host_metadata_element(const struct nvme_host_metadata *data,
 	return val;
 }
 
-/*
- * Walks the Media Unit Status Descriptors. A descriptor is CIO + 2 * MUCS
- * bytes long. CIO shall be a multiple of 16, but a device may report
- * another value, so each descriptor is copied before it is read.
- */
-struct mus_desc_iter {
-	unsigned char *start;
-	unsigned char *p;
-	unsigned char *end;
-	unsigned char *chans;	// Channel Identifiers of the last descriptor
-	uint16_t remaining;
-	size_t need;		// log length needed if the buffer is short
-};
 
-static inline void mus_desc_iter_init(struct mus_desc_iter *it,
-		struct nvme_media_unit_stat_log *log, size_t len)
-{
-	it->start = (unsigned char *)log;
-	it->p = (unsigned char *)log->mus_desc;
-	it->end = it->start + len;
-	it->chans = NULL;
-	it->remaining = len < sizeof(*log) ? 0 : le16_to_cpu(log->nmu);
-	it->need = 0;
-}
-
-static inline bool mus_desc_iter_short(struct mus_desc_iter *it, size_t size)
-{
-	it->need = it->p - it->start + size;
-	it->remaining = 0;
-
-	return false;
-}
-
-/*
- * Copies the next descriptor to @desc. Returns false at the end of the
- * list, at the end of the buffer, or at a descriptor whose CIO points
- * into its own header: the next descriptors cannot be located then.
- */
-static inline bool mus_desc_iter_next(struct mus_desc_iter *it,
-		struct nvme_media_unit_stat_desc *desc)
-{
-	size_t size;
-
-	if (!it->remaining)
-		return false;
-
-	if (!shr_buf_has_room(it->p, it->end, sizeof(*desc)))
-		return mus_desc_iter_short(it, sizeof(*desc));
-
-	memcpy(desc, it->p, sizeof(*desc));
-	if (desc->cio < sizeof(*desc)) {
-		it->remaining = 0;
-		return false;
-	}
-
-	size = desc->cio + desc->mucs * sizeof(__le16);
-	if (!shr_buf_has_room(it->p, it->end, size))
-		return mus_desc_iter_short(it, size);
-
-	it->chans = it->p + desc->cio;
-	it->p += size;
-	it->remaining--;
-
-	return true;
-}
-
-/* Channel Identifier @i of the descriptor most recently returned. */
-static inline uint16_t mus_desc_iter_chan(const struct mus_desc_iter *it,
-		int i)
-{
-	__le16 id;
-
-	memcpy(&id, it->chans + i * sizeof(id), sizeof(id));
-
-	return le16_to_cpu(id);
-}
-void nvme_show_fid_support_effects_log(struct nvme_fid_supported_effects_log *fid_log,
-	const char *devname, nvme_print_flags_t flags);
-void nvme_show_mi_cmd_support_effects_log(struct nvme_mi_cmd_supported_effects_log *mi_cmd_log,
-	const char *devname, nvme_print_flags_t flags);
-void nvme_show_media_unit_stat_log(struct nvme_media_unit_stat_log *mus,
-	size_t len, nvme_print_flags_t flags);
-void nvme_show_supported_cap_config_log(struct nvme_supported_cap_config_list_log *caplog,
-				size_t len, nvme_print_flags_t flags);
-void nvme_show_ctrl_registers(const struct nvme_reg_val *vals, unsigned int nr,
-			      enum nvme_regs_style style,
-			      nvme_print_flags_t flags);
-void nvme_show_id_ns_descs(void *data, unsigned int nsid, nvme_print_flags_t flags);
-void nvme_show_lba_status(struct nvme_lba_status *list, unsigned long len,
-	nvme_print_flags_t flags);
-void nvme_show_list_items(struct libnvme_global_ctx *ctx, nvme_print_flags_t flags);
-void nvme_show_subsystem_list(struct libnvme_global_ctx *ctx, bool show_ana,
-			      nvme_print_flags_t flags);
-void nvme_show_id_nvmset(struct nvme_id_nvmset_list *nvmset, unsigned nvmset_id,
-	nvme_print_flags_t flags);
-void nvme_show_primary_ctrl_cap(const struct nvme_primary_ctrl_cap *cap,
-	nvme_print_flags_t flags);
-void nvme_show_list_secondary_ctrl(const struct nvme_secondary_ctrl_list *sc_list,
-	__u32 count, nvme_print_flags_t flags);
-void nvme_show_id_ns_granularity_list(const struct nvme_id_ns_granularity_list *glist,
-	nvme_print_flags_t flags);
-void nvme_show_id_uuid_list(const struct nvme_id_uuid_list *uuid_list,
-	nvme_print_flags_t flags);
-void nvme_show_list_ctrl(struct nvme_ctrl_list *ctrl_list,
-	 nvme_print_flags_t flags);
-void nvme_show_id_domain_list(struct nvme_id_domain_list *id_dom,
-	nvme_print_flags_t flags);
-void nvme_show_endurance_group_list(struct nvme_id_endurance_group_list *endgrp_list,
-	nvme_print_flags_t flags);
-void nvme_show_list_ns(struct nvme_ns_list *ns_list,
-	nvme_print_flags_t flags);
-void nvme_show_topology(struct libnvme_global_ctx *ctx,
-			enum nvme_cli_topo_ranking ranking,
-			nvme_print_flags_t flags);
-void nvme_show_topology_tabular(struct libnvme_global_ctx *ctx, nvme_print_flags_t flags);
-void nvme_show_feature(enum nvme_features_id fid, int sel, unsigned int result,
-		       void *buf, __u32 data_len, nvme_print_flags_t flags);
-void nvme_show_top(nvme_print_flags_t flags, int refresh_interval);
-void nvme_feature_show_fields(enum nvme_features_id fid, unsigned int result, unsigned char *buf);
-void nvme_directive_show(__u8 type, __u8 oper, __u16 spec, __u32 nsid, __u64 result,
-	void *buf, __u32 len, nvme_print_flags_t flags);
-void nvme_show_select_result(enum nvme_features_id fid, __u64 result);
-
-void nvme_show_zns_id_ctrl(struct nvme_zns_id_ctrl *ctrl,
-			   nvme_print_flags_t flags);
-void nvme_show_id_ctrl_nvm(struct nvme_id_ctrl_nvm *ctrl_nvm,
-	nvme_print_flags_t flags);
-void nvme_show_nvm_id_ns(struct nvme_nvm_id_ns *nvm_ns, unsigned int nsid,
-						struct nvme_id_ns *ns, unsigned int lba_index,
-						bool cap_only, nvme_print_flags_t flags);
-void nvme_show_zns_id_ns(struct nvme_zns_id_ns *ns,
-			 struct nvme_id_ns *id_ns, nvme_print_flags_t flags);
-void nvme_zns_start_zone_list(__u64 nr_zones, struct json_object **zone_list,
-			      nvme_print_flags_t flags);
-void nvme_show_zns_changed(struct nvme_zns_changed_zone_log *log,
-			   nvme_print_flags_t flags);
-void nvme_zns_finish_zone_list(__u64 nr_zones, struct json_object *zone_list,
-			       nvme_print_flags_t flags);
-void nvme_show_zns_report_zones(void *report, __u32 descs,
-				__u8 ext_size, __u32 report_size,
-				struct json_object *zone_list,
-				nvme_print_flags_t flags);
-void json_nvme_finish_zone_list(__u64 nr_zones, 
-	struct json_object *zone_list);
-void nvme_show_list_item(struct libnvme_ns *n, struct shr_table *t);
-
-void nvme_show_fdp_configs(struct nvme_fdp_config_log *configs, size_t len,
-		nvme_print_flags_t flags);
-void nvme_show_fdp_stats(struct nvme_fdp_stats_log *log,
-		nvme_print_flags_t flags);
-void nvme_show_fdp_events(struct nvme_fdp_events_log *log,
-		nvme_print_flags_t flags);
-void nvme_show_fdp_usage(struct nvme_fdp_ruhu_log *log, size_t len,
-		nvme_print_flags_t flags);
-void nvme_show_fdp_ruh_status(struct nvme_fdp_ruh_status *status, size_t len,
-		nvme_print_flags_t flags);
-
-void nvme_show_discovery_log(const struct nvmf_discovery_log *log,
-			     uint64_t numrec, nvme_print_flags_t flags);
-void nvme_show_connect_msg(struct libnvme_ctrl *c, nvme_print_flags_t flags);
-void nvme_show_config_conn_list(struct libnvmf_config *config,
-				 nvme_print_flags_t flags);
-
-const char *nvme_ana_state_to_string(enum nvme_ana_state state);
 const char *nvme_cmd_to_string(int admin, __u8 opcode);
 const char *nvme_fdp_event_to_string(enum nvme_fdp_event_type event);
-const char *nvme_feature_lba_type_to_string(__u8 type);
-const char *nvme_feature_temp_sel_to_string(__u8 sel);
-const char *nvme_feature_temp_type_to_string(__u8 type);
-const char *nvme_feature_to_string(enum nvme_features_id feature);
-const char *nvme_feature_wl_hints_to_string(__u8 wh);
-const char *nvme_feature_perfc_attri_to_string(__u8 attri);
-const char *nvme_feature_perfc_r4karl_to_string(__u8 r4karl);
-const char *nvme_feature_perfc_attrtyp_to_string(__u8 attrtyp);
-const char *nvme_host_metadata_type_to_string(enum nvme_features_id fid, __u8 type);
-const char *nvme_log_to_string(__u8 lid);
-const char *nvme_nss_hw_error_to_string(__u16 error_code);
-const char *nvme_pel_event_to_string(int type);
-const char *nvme_resv_notif_to_string(__u8 type);
-const char *nvme_select_to_string(int sel);
-const char *nvme_sstat_status_to_string(__u16 status);
-const char *nvme_trtype_to_string(__u8 trtype);
-const char *nvme_zone_state_to_string(__u8 state);
-const char *nvme_zone_type_to_string(__u8 cond);
-const char *nvme_plm_window_to_string(__u32 plm);
-const char *nvme_ns_wp_cfg_to_string(enum nvme_ns_write_protect_cfg state);
-const char *nvme_pel_rci_rcpit_to_string(enum nvme_pel_rci_rcpit rcpit);
-const char *nvme_pel_ehai_pit_to_string(enum nvme_pel_ehai_pit pit);
-const char *nvme_ssi_state_to_string(__u8 state);
 const char *nvme_time_scale_to_string(__u8 ts);
-const char *nvme_pls_mode_to_string(__u8 mode);
-const char *nvme_bpwps_to_string(__u8 bpwps);
 const char *nvme_feature_power_limit_scale_to_string(__u8 pls);
 const char *nvme_power_measurement_type_to_string(__u8 pmt);
-const char *nvme_power_measurement_action_to_string(__u8 act);
 const char *nvme_ipmsr_srs_to_string(__u8 srs);
 
-void nvme_dev_full_path(struct libnvme_ns *n, char *path, size_t len);
-void nvme_generic_full_path(struct libnvme_ns *n, char *path, size_t len);
 void nvme_show_message(bool error, const char *msg, ...);
 void nvme_show_verbose_message(const char *msg, ...);
 void nvme_show_perror(const char *msg, ...);
@@ -921,111 +286,7 @@ const char *nvme_format_timestamp_sync(__u8 attr);
 void print_array(char *name, __u8 *data, int size);
 void json_print(struct json_object *r);
 struct json_object *obj_create_array_obj(struct json_object *o, const char *k);
-void json_bitfields(struct json_object *o, const struct bitfield *fields,
-		    unsigned int nr, uint64_t value);
-void nvme_show_mgmt_addr_list_log(struct nvme_mgmt_addr_list_log *ma_list,
-				  nvme_print_flags_t flags);
-void nvme_show_power_meas_log(struct nvme_power_meas_log *log, __u32 size,
-			      nvme_print_flags_t flags);
-void nvme_show_voltage_meas_log(struct nvme_voltage_measurement_log *log,
-				__u32 size, nvme_print_flags_t flags);
-void nvme_show_rotational_media_info_log(struct nvme_rotational_media_info_log *info,
-					 nvme_print_flags_t flags);
-void nvme_show_dispersed_ns_psub_log(struct nvme_dispersed_ns_participating_nss_log *log,
-				     __u64 len, nvme_print_flags_t flags);
-void nvme_show_reachability_groups_log(struct nvme_reachability_groups_log *log,
-				       __u64 len, nvme_print_flags_t flags);
-void nvme_show_reachability_associations_log(struct nvme_reachability_associations_log *log,
-					     __u64 len, nvme_print_flags_t flags);
-void nvme_show_host_discovery_log(struct nvme_host_discovery_log *log,
-				  __u64 len, nvme_print_flags_t flags);
-void nvme_show_ave_discovery_log(struct nvme_ave_discovery_log *log,
-				 __u64 len, nvme_print_flags_t flags);
-void nvme_show_pull_model_ddc_req_log(struct nvme_pull_model_ddc_req_log *log,
-				      __u64 len, nvme_print_flags_t flags);
-void nvme_show_log(const char *devname, enum nvme_cmd_get_log_lid lid, __u32 nsid, __u16 lsi,
-		   __u8 lsp, void *log, __u32 len, nvme_print_flags_t flags);
-void nvme_show_pel_header(struct nvme_persistent_event_log *pevent_log_head, int human);
-struct nvme_persistent_event_entry *nvme_pel_event(void *pevent_log_info,
-		__u32 size, __u32 offset);
-void *nvme_pel_event_data(void *pevent_log_info, __u32 offset, __u32 len,
-		__u32 *buf_len);
-void nvme_show_pel_event_header(int i, struct nvme_persistent_event_entry *pevent_entry_head,
-				int human);
-void nvme_show_pel_smart_health_event(void *pevent_log_info, __u32 offset,
-				      const char *devname);
-void nvme_show_pel_fw_commit_event(void *pevent_log_info, __u32 offset);
-void nvme_show_pel_timestamp_event(void *pevent_log_info, __u32 offset);
-void nvme_show_pel_power_on_reset_event(void *pevent_log_info, __u32 offset,
-					struct nvme_persistent_event_entry *pevent_entry_head);
-void nvme_show_pel_nss_hw_error_event(void *pevent_log_info, __u32 offset);
-void nvme_show_pel_change_ns_event(void *pevent_log_info, __u32 offset);
-void nvme_show_pel_format_start_event(void *pevent_log_info, __u32 offset);
-void nvme_show_pel_format_completion_event(void *pevent_log_info, __u32 offset);
-void nvme_show_pel_sanitize_start_event(void *pevent_log_info, __u32 offset);
-void nvme_show_pel_sanitize_completion_event(void *pevent_log_info, __u32 offset);
-#define NVME_PEL_FEATURE_DATA_SIZE	4096
-void *nvme_pel_set_feature_data(void *data, __u32 len);
-void nvme_show_pel_set_feature_event(void *data, __u32 len);
-void nvme_show_pel_thermal_excursion_event(void *pevent_log_info, __u32 offset);
-void nvme_show_pel_vendor_specific_event(void *pevent_log_info, __u32 offset,
-					 __u32 event_data_len);
-void nvme_json_pevent_log_head(struct nvme_persistent_event_log *pevent_log_head,
-			       struct json_object *r);
-void nvme_json_pel_smart_health(void *pevent_log_info, __u32 offset,
-				struct json_object *valid_attrs);
-void nvme_json_pel_fw_commit(void *pevent_log_info, __u32 offset,
-			     struct json_object *valid_attrs);
-void nvme_json_pel_timestamp(void *pevent_log_info, __u32 offset,
-			     struct json_object *valid_attrs);
-void nvme_json_pel_power_on_reset(void *pevent_log_info, __u32 offset,
-				  struct json_object *valid_attrs,
-				  __le16 vsil, __le16 el,
-				  __u32 size);
-void nvme_json_pel_nss_hw_error(void *pevent_log_info, __u32 offset,
-				struct json_object *valid_attrs);
-void nvme_json_pel_change_ns(void *pevent_log_info, __u32 offset,
-			     struct json_object *valid_attrs);
-void nvme_json_pel_format_start(void *pevent_log_info, __u32 offset,
-				struct json_object *valid_attrs);
-void nvme_json_pel_format_completion(void *pevent_log_info, __u32 offset,
-				     struct json_object *valid_attrs);
-void nvme_json_pel_sanitize_start(void *pevent_log_info, __u32 offset,
-				  struct json_object *valid_attrs);
-void nvme_json_pel_sanitize_completion(void *pevent_log_info, __u32 offset,
-				       struct json_object *valid_attrs);
-void nvme_json_pel_set_feature(void *data, __u32 len,
-			       struct json_object *valid_attrs);
-void nvme_json_pel_telemetry_crt(void *pevent_log_info, __u32 offset,
-				 struct json_object *valid_attrs,
-				 __u32 len, __u32 size);
-void nvme_json_pel_thermal_excursion(void *pevent_log_info, __u32 offset,
-				     struct json_object *valid_attrs);
-void nvme_json_pel_vendor_specific_event(void *pevent_log_info, __u32 offset,
-					 __u32 event_data_len,
-					 struct json_object *valid_attrs);
 const char *nvme_support_str(bool support);
 const char *nvme_yes_str(bool yes);
 
 extern const char *alloc_error;
-extern const char *feat_ae_dlpcn;
-extern const char *feat_ae_hdlpcn;
-extern const char *feat_ae_adlpcn;
-extern const char *feat_ae_pmdrlpcn;
-extern const char *feat_ae_zdcn;
-extern const char *feat_ae_rlccn;
-extern const char *feat_ae_lhcn;
-extern const char *feat_ae_ccrcn;
-extern const char *feat_ae_ansan;
-extern const char *feat_ae_rgrp0;
-extern const char *feat_ae_rassn;
-extern const char *feat_ae_tthry;
-extern const char *feat_ae_nnsshdn;
-extern const char *feat_ae_ega;
-extern const char *feat_ae_lbas;
-extern const char *feat_ae_pla;
-extern const char *feat_ae_ana;
-extern const char *feat_ae_telem;
-extern const char *feat_ae_fw;
-extern const char *feat_ae_nan;
-extern const char *feat_ae_smart;

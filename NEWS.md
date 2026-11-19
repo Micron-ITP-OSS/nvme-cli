@@ -49,15 +49,23 @@
   it, only the archive options fail. nvme declares it in an ELF
   `.note.dlopen` note. Static builds, FreeBSD and Windows still link it.
 
-* The plugins are modules, which nvme loads when a command uses them:
-  a command loads at most the module of its plugin, so nvme starts as
-  fast as before. They are installed in
-  `<libdir>/nvme-cli/<version>/plugins`. Without the module of a
-  plugin, `nvme <plugin>` says the plugin is not installed, so packages
-  can ship plugins on their own. The new `plugin-modules` option
-  (`auto` by default) decides; static builds, Windows and fuzz builds
-  link the plugins in, as before. An initramfs which runs a plugin
-  command needs its module, e.g. `nbft.so` for `nvme nbft show`. See
+* nvme loads libkmod at runtime, to load the nvme-fabrics module before
+  it connects or discovers, instead of linking it. Packages can make
+  libkmod a weak dependency; without it, nvme doesn't load the module, as
+  in a build without libkmod. nvme declares it in an ELF `.note.dlopen`
+  note. Static builds still link it.
+
+* The plugins and the top-level commands are modules, which nvme loads
+  when a command uses them: a command loads only the module which
+  provides it, so nvme starts as fast as before, and the nvme binary
+  shrinks to about a third. They are installed in
+  `<libdir>/nvme-cli/<version>/plugins`. Without the module, nvme says
+  the plugin or the command is not installed, so packages can ship
+  plugins on their own. The new `plugin-modules` option (`auto` by
+  default) decides; static builds, Windows and fuzz builds link the
+  plugins in, as before. An initramfs needs the modules of the commands
+  it runs, e.g. `cmds-fabrics.so` for `nvme connect-all`, `cmds-list.so`
+  for `nvme list-subsys` and `cmds-nbft.so` for `nvme nbft show`. See
   [BUILDING.md](Documentation/BUILDING.md).
 
 ### Fabrics

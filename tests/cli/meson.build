@@ -10,6 +10,10 @@ cli_test_env.prepend('PYTHONPATH', meson.project_source_root())
 cli_test_env.set('NVME_TEST_JSON', json_c_dep.found() ? '1' : '0')
 # Without libarchive, the archive options of the vendor plugins fail.
 cli_test_env.set('NVME_TEST_LIBARCHIVE', libarchive_dep.found() ? '1' : '0')
+# Without libkmod, nvme doesn't load the nvme-fabrics module.
+cli_test_env.set('NVME_TEST_LIBKMOD', libkmod_dep.found() ? '1' : '0')
+# get-log is a command of the log plugin.
+cli_test_env.set('NVME_TEST_GET_LOG', 'log' in selected_plugins ? '1' : '0')
 
 if python3.found()
     # Standalone CLI test for the ownership registry.  It needs no device
@@ -82,6 +86,22 @@ if python3.found()
                  files('nbft/NBFT-unlinked-discovery'),
                  meson.project_source_root() / 'libnvme/tests/nbft/tables/NBFT-static-ipv4',
                  meson.project_source_root() / 'libnvme/tests/nbft/tables/NBFT-synthetic-2hfi-3ssns-disc-sec',
+             ],
+             env: cli_test_env,
+             depends: nvme_runtime,
+             suite: 'mock')
+    endif
+
+    # The modules of the top-level commands, with the deprecated ones
+    if want_plugin_modules and want_deprecated_cmds and \
+       'log' in selected_plugins and 'fw' in selected_plugins and \
+       'ns' in selected_plugins
+        test('nvme-cli - command-modules',
+             python3,
+             args: [
+                 files('nvme_command_modules_test.py'),
+                 nvme_exe,
+                 meson.project_build_root() / 'plugins',
              ],
              env: cli_test_env,
              depends: nvme_runtime,
@@ -208,6 +228,11 @@ if python3.found()
             ]
         endif
 
+        if 'fdp' in selected_plugins
+            mock_cli_tests += [
+                ['fdp', 'nvme_fdp_test.py', cli_test_env, 30],
+            ]
+        endif
         if 'lm' in selected_plugins
             mock_cli_tests += [
                 ['lm', 'nvme_lm_test.py', cli_test_env, 30],
@@ -354,7 +379,7 @@ if python3.found()
     endif
 
     if 'ocp' in selected_plugins
-        subdir('ocp')
+        subdir('cmds_ocp')
     endif
 
     if 'netapp' in selected_plugins
@@ -407,6 +432,10 @@ if python3.found()
 
     if 'dapustor' in selected_plugins
         subdir('dapustor')
+    endif
+
+    if 'dera' in selected_plugins
+        subdir('dera')
     endif
 
     if 'intel' in selected_plugins

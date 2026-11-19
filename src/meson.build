@@ -7,29 +7,14 @@ sources = [
     'src/global-ctx.c',
     'src/global-options.c',
     'src/logging.c',
-    'src/nvme-models.c',
     'src/nvme-pci-ids.c',
     'src/nvme-print-binary.c',
     'src/nvme-print-stdout.c',
-    'src/nvme-print-stdout-id.c',
-    'src/nvme-print-stdout-log.c',
     'src/nvme-print.c',
-    'src/nvme-regs.c',
+    'src/nvme-resources.c',
     'src/nvme.c',
-    'src/nvme-cmds-enumerate.c',
-    'src/nvme-cmds-ctrl.c',
-    'src/nvme-cmds-deprecated.c',
-    'src/nvme-cmds-discovery.c',
-    'src/nvme-cmds-fabrics.c',
-    'src/nvme-cmds-feature.c',
-    'src/nvme-cmds-io.c',
-    'src/nvme-cmds-passthru.c',
-    'src/nvme-cmds-registers.c',
-    'src/nvme-cmds-sanitize.c',
-    'src/nvme-cmds-security.c',
     'src/plugin.c',
     'src/privsep.c',
-    'src/bitfields.c',
     'src/field-parser.c',
 ]
 
@@ -40,7 +25,6 @@ endif
 if host_system == 'linux'
     sources += [
         'src/nvme-pci-ids-linux.c',
-        'src/dashboard.c',
     ]
 elif host_system == 'windows'
     sources += [
@@ -59,15 +43,3 @@ if json_c_dep.found()
     ]
 endif
 
-if want_fabrics
-    sources += [
-        'src/fabrics.c',
-        'src/config-convert.c',
-        'src/config-create.c',
-        'src/pre-os.c',
-    ]
-endif
-
-if want_top
-    sources += ['src/nvme-iostat.c', 'src/nvme-print-stdout-top.c']
-endif

@@ -60,35 +60,36 @@ string, a callback, and optionally an alias, a `deprecated` flag, or a
 
 ### Add a command to an existing group
 
-The built-in (no-plugin-prefix) commands are split by feature area across
-`src/nvme-cmds-*.c` (e.g. `src/nvme-cmds-io.c` for read/write/flush/...,
-`src/nvme-cmds-registers.c` for register access, etc.). Pick the file that
-matches your command's area, or add a new `src/nvme-cmds-<area>.c` if none
-fit -- just add the one line to `src/meson.build`'s `sources` list. Each
-such file ends with a block like this one from `src/nvme-cmds-discovery.c`:
+The top-level commands (`nvme read`, `nvme connect`, ...) live in plugins
+without a command group of their own, one per feature area: e.g.
+`plugins/cmds-io` for read/write/flush, `plugins/cmds-admin` for format,
+sanitize and reset, `plugins/cmds-fabrics` for connect and discover. Pick
+the plugin that matches the area of your command. Each ends with a block
+like this one from `plugins/cmds-io/cmds-io-plugin.c`:
 
 ```c
-static struct command get_log_cmd = {
-	.name = "get-log",
-	.help = "Generic NVMe get log, returns log in raw format",
-	.fn = get_log,
+static struct command flush_cmd_cmd = {
+	.name = "flush",
+	.help = "Submit a Flush command, return results",
+	.fn = flush_cmd,
 };
 
 static struct command *commands[] = {
-	&get_log_cmd,
+	&flush_cmd_cmd,
 	/* ... */
 	NULL,
 };
 
-static void __shr_constructor register_group(void)
+NVME_PLUGIN_INIT(register_plugin)
 {
-	plugin_add_group(&builtin, "Log Page & Identify", commands);
+	plugin_add_group(&builtin, "I/O Commands", commands);
 }
 ```
 
 To add a command, write its callback function, add a `struct command`
-literal for it, and add that entry to the `commands[]` array. The
-callback's prototype is:
+literal for it, add that entry to the `commands[]` array, and add its name
+to `plugin_commands` in the plugin's `meson.build` (see "Top-level
+commands in a plugin" below). The callback's prototype is:
 
 ```c
 int f(int argc, char **argv, struct command *command, struct plugin *plugin);
@@ -97,16 +98,16 @@ int f(int argc, char **argv, struct command *command, struct plugin *plugin);
 `argc`/`argv` are adjusted to start after the sub-command. For
 `nvme foo --option=bar`, `argc` is 1 and `argv` starts at `--option`.
 Use `.alias = "other-name"` for an alias, and `.deprecated = true` for a
-deprecated command (deprecated built-ins live in
-`src/nvme-cmds-deprecated.c`, gated by `#ifdef CONFIG_DEPRECATED_CMDS`).
+deprecated command (the deprecated top-level commands live in the
+`plugins/cmds-deprecated` plugin, built with `-Ddeprecated-cmds=enabled`).
 Set `.no_device = true` for a command that doesn't take a positional
 `<device>` argument (e.g. `nvme list` or `nvme gen-hostnqn`) -- this drops
 `<device>` from its usage line and, when none of a plugin's commands need
 one, from that plugin's `--help` output too.
 
-The `title` passed to `plugin_add_group()` (`"Log Page & Identify"` above)
-is the heading shown for that group's commands in `nvme help`; pass `NULL`
-for no heading (that's what plugins normally do, see below).
+The `title` passed to `plugin_add_group()` (`"I/O Commands"` above) is the
+heading of the group in `nvme help`. Pass `NULL` for no heading, as plugins
+with their own command group normally do (see below).
 
 ### Add a new plugin
 
@@ -180,9 +181,29 @@ group's commands instead of in the flat "core NVMe/NVMeoF plugins" list.
 This only affects display -- the plugin is still invoked as `nvme foo bar`,
 not merged into the flat top-level command namespace.
 
+#### Top-level commands in a plugin
+
+A plugin can add top-level commands, `nvme bar` rather than `nvme foo bar`.
+Its `NVME_PLUGIN_INIT()` function calls
+`plugin_add_group(&builtin, title, commands)` with one of the titles of
+`builtin_groups` in `src/nvme.c`. The title gives the commands their place
+in `nvme help` and in the command lists. A plugin with only top-level
+commands calls no `register_extension()` and sets
+`plugin_extension = false` in its `meson.build`. The `meson.build` lists
+the top-level commands and their aliases:
+
+```meson
+plugin_commands = ['bar', 'baz']
+plugin_command_aliases = {'bar': 'old-bar'}
+```
+
+nvme looks a top-level command it doesn't have up in these lists and
+loads the module. The `command-index` test checks that the lists name
+exactly the commands of the plugin.
+
 #### Multi-file plugins
 
-A plugin can span multiple `.c` files (see `plugins/ocp` or
+A plugin can span multiple `.c` files (see `plugins/cmds-ocp` or
 `plugins/solidigm` for real examples): put the `struct plugin` definition
 and any shared declarations in a small header, and `#include` it from each
 file. A plugin has one `NVME_PLUGIN_INIT()` function. To show the commands
@@ -199,7 +220,7 @@ Neither needs hardware. `Documentation/TESTING.md` describes the tools.
 **Mock tests** run the real `nvme` binary against a mocked controller:
 `tests/cli/libmock_nvme.c` intercepts the ioctls and hands every command
 to a Python object in the test, which answers it (`tests/cli/nvme_mock.py`).
-Vendor tests live in `tests/cli/<plugin>/`; `tests/cli/ocp/` (a shared
+Vendor tests live in `tests/cli/<plugin>/`; `tests/cli/cmds_ocp/` (a shared
 controller class, one file per command), `tests/cli/wdc/` (several
 models) and `tests/cli/micron/` are examples. A test
 
@@ -507,7 +528,7 @@ how to triage and fix findings. Give it precise input data:
   checks.
 
 For example: "Add mock tests for `nvme <plugin> <command>` in
-`tests/cli/<plugin>/` following `tests/cli/ocp/`. The log layout is in
+`tests/cli/<plugin>/` following `tests/cli/cmds_ocp/`. The log layout is in
 `<file>`, the output of a real drive in `<file>`. Use non-zero values in
 every field and check normal and JSON output. Then add the command to the
 device fuzz table, sweep it and compare its coverage with and without the

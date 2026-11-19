@@ -33,6 +33,7 @@
 #include "nvme-cmds.h"
 #include "nvme-print.h"
 #include "plugin.h"
+#include "plugins/cmds-log/log-print.h"
 #include "solidigm-util.h"
 
 #define DWORD_SIZE 4

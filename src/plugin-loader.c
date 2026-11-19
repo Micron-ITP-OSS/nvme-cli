@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * The plugin modules. nvme loads a module when its plugin is used: by its
- * name on the command line, or all of them for the lists of commands.
+ * name on the command line, or all of them for the lists of commands. A
+ * module is named after the directory of its plugin, which may differ from
+ * the name of the plugin, e.g. cmds-id.so for "nvme id".
  *
- * The module <name>.so exports nvme_plugin_<id>_abi, the interface it was
+ * The module <module>.so exports nvme_plugin_<id>_abi, the interface it was
  * built for, and nvme_plugin_<id>_init(), which registers its plugin, with
- * <id> the name with '_' for '-'. The loader calls it only when the
+ * <id> the module name with '_' for '-'. The loader calls it only when the
  * interface is the one of this nvme.
  */
 #include <dirent.h>
@@ -21,7 +23,9 @@
 #include <sys/auxv.h>
 
 #include <ccan/array_size/array_size.h>
+#include <ccan/str/str.h>
 
+#include "command-index.h"
 #include "plugin-loader.h"
 #include "plugin-names.h"
 
@@ -115,7 +119,7 @@ static bool is_loaded(void *handle)
 	return false;
 }
 
-/* The symbol @sym of the module of plugin @name, see NVME_PLUGIN_INIT() */
+/* The symbol @sym of the module @name, see NVME_PLUGIN_INIT() */
 static void *module_sym(void *handle, const char *name, const char *sym)
 {
 	char buf[NAME_MAX + 32];
@@ -160,7 +164,7 @@ static void load_module(const char *dir, const char *name)
 		dlclose(handle);
 		return;
 	}
-	if (strcmp(abi, NVME_PLUGIN_ABI)) {
+	if (!streq(abi, NVME_PLUGIN_ABI)) {
 		fprintf(stderr,
 			"ignoring %s: built for nvme %s, this is nvme %s\n",
 			path, abi, NVME_PLUGIN_ABI);
@@ -179,7 +183,7 @@ static void load_module(const char *dir, const char *name)
 	init();
 }
 
-/* A plugin name, not a path */
+/* A plugin or module name, not a path */
 static bool valid_name(const char *name)
 {
 	size_t len = strspn(name, "abcdefghijklmnopqrstuvwxyz0123456789-_");
@@ -187,32 +191,59 @@ static bool valid_name(const char *name)
 	return len && len <= NAME_MAX - strlen(MODULE_SUFFIX) && !name[len];
 }
 
+/* The plugins of this build and their modules */
+static const struct {
+	const char *name;
+	const char *module;
+} plugins[] = { NVME_PLUGIN_NAMES };
+
+/* The module of the plugin @name, or @name for a module name */
+static const char *plugin_module(const char *name)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(plugins); i++) {
+		if (streq(name, plugins[i].name))
+			return plugins[i].module;
+	}
+	return name;
+}
+
 void nvme_load_plugin(const char *name)
 {
+	const char *module = plugin_module(name);
 	char path[PATH_MAX];
 	int len;
 
-	if (all_loaded || !valid_name(name))
+	if (all_loaded || !valid_name(module))
 		return;
 
 	len = snprintf(path, sizeof(path), "%s/%s" MODULE_SUFFIX,
-		       nvme_plugin_dir(), name);
+		       nvme_plugin_dir(), module);
 	if (len < 0 || (size_t)len >= sizeof(path) || access(path, F_OK))
 		return;
 
-	load_module(nvme_plugin_dir(), name);
+	load_module(nvme_plugin_dir(), module);
 }
 
 bool nvme_plugin_known(const char *name)
 {
-	static const char *const names[] = { NVME_PLUGIN_NAMES };
 	size_t i;
 
-	for (i = 0; i < ARRAY_SIZE(names); i++) {
-		if (!strcmp(name, names[i]))
+	for (i = 0; i < ARRAY_SIZE(plugins); i++) {
+		if (streq(name, plugins[i].name))
 			return true;
 	}
 	return false;
+}
+
+const struct nvme_command_entry *nvme_command_index(void)
+{
+	static const struct nvme_command_entry index[] = {
+		NVME_COMMAND_INDEX
+	};
+
+	return index;
 }
 
 static int is_module(const struct dirent *entry)
@@ -221,7 +252,30 @@ static int is_module(const struct dirent *entry)
 	size_t suffix = strlen(MODULE_SUFFIX);
 
 	return len > suffix &&
-	       !strcmp(entry->d_name + len - suffix, MODULE_SUFFIX);
+	       streq(entry->d_name + len - suffix, MODULE_SUFFIX);
+}
+
+/* The name of the plugin of the module file @file, or the module name */
+static const char *file_plugin(const char *file, char *buf, size_t size)
+{
+	size_t i;
+
+	snprintf(buf, size, "%.*s", (int)(strlen(file) - strlen(MODULE_SUFFIX)),
+		 file);
+	for (i = 0; i < ARRAY_SIZE(plugins); i++) {
+		if (streq(buf, plugins[i].module))
+			return plugins[i].name;
+	}
+	return buf;
+}
+
+/* Load the modules in the order of their plugin names, not file names */
+static int by_plugin(const struct dirent **a, const struct dirent **b)
+{
+	char buf_a[NAME_MAX + 1], buf_b[NAME_MAX + 1];
+
+	return strcmp(file_plugin((*a)->d_name, buf_a, sizeof(buf_a)),
+		      file_plugin((*b)->d_name, buf_b, sizeof(buf_b)));
 }
 
 void nvme_load_plugins(void)
@@ -235,14 +289,14 @@ void nvme_load_plugins(void)
 	all_loaded = true;
 
 	dir = nvme_plugin_dir();
-	n = scandir(dir, &entries, is_module, alphasort);
+	n = scandir(dir, &entries, is_module, by_plugin);
 	if (n < 0)
 		return;
 
 	for (i = 0; i < n; i++) {
 		char *name = entries[i]->d_name;
 
-		/* the plugin name: the file name without the suffix */
+		/* the module name: the file name without the suffix */
 		name[strlen(name) - strlen(MODULE_SUFFIX)] = '\0';
 		if (valid_name(name))
 			load_module(dir, name);

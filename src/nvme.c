@@ -34,6 +34,7 @@
 #include <ccan/array_size/array_size.h>
 #include <ccan/endian/endian.h>
 #include <ccan/minmax/minmax.h>
+#include <ccan/str/str.h>
 #include <shared/compiler-attributes-util.h>
 #include <shared/fs-util.h>
 #include <shared/mmio-util.h>
@@ -53,11 +54,28 @@
 
 static const char nvme_version_string[] = NVME_VERSION;
 
+/* The groups of the top-level commands, in the order of the help */
+static const char *const builtin_groups[] = {
+	"Device Enumeration",
+	"Controller Management",
+	"Deprecated",
+	"Log Page & Identify",
+	"Fabrics",
+	"Features",
+	"I/O Commands",
+	"Passthrough",
+	"Registers",
+	"Media Management",
+	"Security & Access Control",
+	NULL,
+};
+
 struct plugin builtin = {
 	.name = NULL,
 	.desc = NULL,
 	.next = NULL,
 	.tail = &builtin,
+	.group_order = builtin_groups,
 };
 
 static struct program nvme = {
@@ -68,73 +86,6 @@ static struct program nvme = {
 		"and configure NVMe-oF fabrics connections.",
 	.extensions = &builtin,
 };
-
-static const char *raw_identify = "show identify in binary format";
-
-int __id_ctrl(int argc, char **argv, struct command *acmd, struct plugin *plugin,
-		void (*vs)(__u8 *vs, struct json_object *root))
-{
-	const char *desc = "Send an Identify Controller command to "
-		"the given device and report information about the specified "
-		"controller in human-readable or "
-		"binary format. May also return vendor-specific "
-		"controller attributes in hex-dump if requested.";
-	const char *vendor_specific = "dump binary vendor field";
-
-	__cleanup_libnvme_free struct nvme_id_ctrl *ctrl = NULL;
-	__cleanup_nvme_global_ctx struct libnvme_global_ctx *ctx = NULL;
-	__cleanup_nvme_transport_handle struct libnvme_transport_handle *hdl = NULL;
-	struct libnvme_passthru_cmd cmd;
-	nvme_print_flags_t flags;
-	int err;
-
-	struct config {
-		bool	vendor_specific;
-		bool	raw_binary;
-	};
-
-	struct config cfg = {
-		.vendor_specific	= false,
-		.raw_binary		= false,
-	};
-
-	OPT_ARGS(opts) = {
-		OPT_FLAG("vendor-specific", 'V', &cfg.vendor_specific,
-			 vendor_specific),
-		OPT_FLAG("raw-binary",      'b', &cfg.raw_binary, raw_identify),
-		OPT_END()
-	};
-
-	err = parse_and_open(&ctx, &hdl, argc, argv, desc, opts);
-	if (err)
-		return err;
-
-	flags = nvme_args.output_flags;
-
-	if (cfg.raw_binary)
-		flags = BINARY;
-
-	if (cfg.vendor_specific)
-		flags |= VS;
-
-	if (nvme_args.verbose)
-		flags |= VERBOSE;
-
-	ctrl = libnvme_alloc(sizeof(*ctrl));
-	if (!ctrl)
-		return -ENOMEM;
-
-	nvme_init_identify_ctrl(&cmd, ctrl);
-	err = libnvme_exec_admin_passthru(hdl, &cmd);
-	if (err) {
-		nvme_show_err(err, "identify controller");
-		return err;
-	}
-
-	nvme_show_id_ctrl(ctx, hdl, ctrl, flags, vs);
-
-	return err;
-}
 
 void register_extension(struct plugin *plugin)
 {
@@ -205,7 +156,7 @@ static void nvme_sandbox_init(void)
 	enable = true;
 #endif
 	if (env)
-		enable = strcmp(env, "0");
+		enable = !streq(env, "0");
 	shr_sandbox_enable(enable);
 }
 
@@ -231,6 +182,19 @@ int nvme_main(int argc, char **argv)
 #endif
 
 	nvme.extensions->parent = &nvme;
+
+	/*
+	 * The top-level commands come from plugins, which may not be loaded
+	 * yet. Start with an empty list.
+	 */
+	if (!builtin.commands) {
+		builtin.commands = calloc(1, sizeof(*builtin.commands));
+		if (!builtin.commands) {
+			fprintf(stderr, "%s: out of memory\n", argv[0]);
+			return 1;
+		}
+	}
+
 	if (argc < 2) {
 		general_help(&builtin, NULL);
 		return 0;

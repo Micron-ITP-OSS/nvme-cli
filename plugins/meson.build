@@ -3,25 +3,64 @@
 fs = import('fs')
 
 selected_plugins = get_option('plugins')
-# The sandisk plugin runs the commands of the wdc one for older drives
-if 'sandisk' in selected_plugins and 'wdc' not in selected_plugins
-    selected_plugins += 'wdc'
-endif
 
-# Each plugin directory appends its sources to plugin_sources. It may set
-# plugin_name, the name of the plugin on the command line, when it is not
-# the name of the directory, and plugin_needs to the plugins whose
-# functions it calls.
+# A plugin lives in plugins/<plugin>, or in plugins/cmds-<plugin> for the
+# plugins of nvme itself. Its directory appends its sources to
+# plugin_sources. It may set plugin_name, the name of the plugin on the
+# command line, when it is not the name of the directory, and plugin_needs
+# to the plugins whose functions it calls. Plugins needed by a selected
+# plugin are selected as well: each round visits the plugins needed by the
+# previous round.
+#
+# A plugin which adds top-level commands ("nvme <command>") lists them in
+# plugin_commands, and their aliases in plugin_command_aliases, a dict
+# from command to alias. nvme loads the module for these commands. A
+# plugin with only top-level commands, without "nvme <plugin>", sets
+# plugin_extension to false.
 plugin_sources = []
 enabled_plugins = []
 plugin_defs = []
-foreach plugin_dir : selected_plugins
-  plugin_dir = plugin_dir.strip()
-  if plugin_dir != ''
+visited_plugins = []
+pending_plugins = selected_plugins
+# The deprecated top-level commands are a plugin of their own
+if want_deprecated_cmds
+  pending_plugins += 'deprecated'
+endif
+# The I/O commands
+pending_plugins += 'cmds-io'
+pending_plugins += 'cmds-admin'
+# The register commands
+pending_plugins += 'cmds-regs'
+# The passthru commands
+pending_plugins += 'cmds-passthru'
+# get-feature and set-feature are top-level commands of the feat plugin
+pending_plugins += 'feat'
+# The device enumeration commands
+pending_plugins += 'cmds-list'
+# The fabrics top-level commands
+pending_plugins += 'cmds-fabrics'
+foreach round : range(16)
+  if pending_plugins.length() == 0
+    break
+  endif
+  needed_plugins = []
+  foreach plugin_dir : pending_plugins
+    plugin_dir = plugin_dir.strip()
+    if plugin_dir == '' or plugin_dir in visited_plugins
+      continue
+    endif
+    visited_plugins += plugin_dir
+    plugin_subdir = plugin_dir
+    if fs.is_dir(meson.current_source_dir() / ('cmds-' + plugin_dir))
+      plugin_subdir = 'cmds-' + plugin_dir
+    endif
     n_sources_before = plugin_sources.length()
-    plugin_name = plugin_dir
+    plugin_name = plugin_subdir
     plugin_needs = []
-    subdir(plugin_dir)
+    plugin_extension = true
+    plugin_commands = []
+    plugin_command_aliases = {}
+    subdir(plugin_subdir)
     if plugin_sources.length() > n_sources_before
       enabled_plugins += plugin_dir
       srcs = []
@@ -30,15 +69,35 @@ foreach plugin_dir : selected_plugins
       endforeach
       plugin_defs += {
         'dir': plugin_dir,
+        'subdir': plugin_subdir,
         'name': plugin_name,
         'sources': srcs,
         'needs': plugin_needs,
+        'extension': plugin_extension,
+        'commands': plugin_commands,
+        'aliases': plugin_command_aliases,
       }
+      foreach need : plugin_needs
+        if need not in visited_plugins and need not in needed_plugins
+          needed_plugins += need
+        endif
+      endforeach
     endif
+  endforeach
+  pending_plugins = needed_plugins
+endforeach
+if pending_plugins.length() > 0
+  error('plugin_needs nest too deep: @0@'.format(pending_plugins))
+endif
+# Treat the implicitly selected plugins as selected
+foreach plugin_dir : visited_plugins
+  if plugin_dir not in selected_plugins
+    selected_plugins += plugin_dir
   endif
 endforeach
 
-# The plugins other plugins need come first, they are linked to them
+# Build the providers first, each after the providers it needs, as they
+# are linked to it. The other plugins follow in their original order.
 plugin_providers = []
 foreach def : plugin_defs
   foreach need : def['needs']
@@ -51,15 +110,52 @@ foreach def : plugin_defs
   endforeach
 endforeach
 ordered_plugin_defs = []
-foreach def : plugin_defs
-  if def['dir'] in plugin_providers
-    ordered_plugin_defs += def
-  endif
+ordered_providers = []
+foreach round : range(plugin_providers.length())
+  foreach def : plugin_defs
+    if def['dir'] in plugin_providers and def['dir'] not in ordered_providers
+      ready = true
+      foreach need : def['needs']
+        if need not in ordered_providers
+          ready = false
+        endif
+      endforeach
+      if ready
+        ordered_plugin_defs += def
+        ordered_providers += def['dir']
+      endif
+    endif
+  endforeach
 endforeach
+if ordered_providers.length() != plugin_providers.length()
+  error('the plugins need each other: @0@'.format(plugin_providers))
+endif
 foreach def : plugin_defs
   if def['dir'] not in plugin_providers
     ordered_plugin_defs += def
   endif
+endforeach
+
+# The top-level commands of the plugins: "<plugin>:<command>[=<alias>]"
+plugin_command_index = []
+command_index = []
+foreach def : plugin_defs
+  foreach cmd, alias : def['aliases']
+    if cmd not in def['commands']
+      error('the @0@ plugin has an alias for no command: @1@'.format(
+            def['dir'], cmd))
+    endif
+  endforeach
+  foreach cmd : def['commands']
+    alias = def['aliases'].get(cmd, '')
+    entry = '@0@:@1@'.format(def['subdir'], cmd)
+    if alias != ''
+      entry += '=' + alias
+    endif
+    plugin_command_index += entry
+    command_index += '{ "@0@", @1@, "@2@" }, '.format(
+      cmd, alias != '' ? '"' + alias + '"' : 'NULL', def['subdir'])
+  endforeach
 endforeach
 
 plugin_deps = []
@@ -83,14 +179,25 @@ if want_plugin_modules
     configuration: {'NVME_PLUGIN_ABI': '"' + conf.get_unquoted('NVME_PLUGIN_ABI') + '"'},
   )
 
-  # The plugins of this build, a missing module is "not installed"
+  # The plugins of this build and their modules, which are named after
+  # the directory of the plugin. A missing module is "not installed".
   plugin_names = []
   foreach def : plugin_defs
-    plugin_names += '"@0@"'.format(def['name'])
+    if def['extension']
+      plugin_names += '{ "@0@", "@1@" }'.format(def['name'], def['subdir'])
+    endif
   endforeach
   configure_file(
     output: 'plugin-names.h',
     configuration: {'NVME_PLUGIN_NAMES': ', '.join(plugin_names)},
+  )
+
+  # The top-level commands of the modules, see plugin-loader.c
+  configure_file(
+    output: 'command-index.h',
+    configuration: {
+      'NVME_COMMAND_INDEX': ''.join(command_index) + '{ NULL, NULL, NULL }',
+    },
   )
 endif
 plugin_names_inc = include_directories('.')
@@ -122,7 +229,7 @@ foreach def : ordered_plugin_defs
     'include_directories': include_directories('../src'),
     'c_args': c_args + [
       '-DNVME_PLUGIN_MODULE',
-      '-DNVME_PLUGIN_ID=' + def['name'].replace('-', '_'),
+      '-DNVME_PLUGIN_ID=' + def['subdir'].replace('-', '_'),
     ],
     'dependencies': plugin_deps,
     'link_with': link_with,
@@ -133,9 +240,9 @@ foreach def : ordered_plugin_defs
     'install_dir': plugin_module_dir,
   }
   if def['dir'] in plugin_providers
-    target = shared_library(def['name'], srcs, kwargs: module_kwargs)
+    target = shared_library(def['subdir'], srcs, kwargs: module_kwargs)
   else
-    target = shared_module(def['name'], srcs, kwargs: module_kwargs)
+    target = shared_module(def['subdir'], srcs, kwargs: module_kwargs)
   endif
   plugin_targets += {def['dir']: target}
   plugin_module_targets += target
@@ -157,11 +264,16 @@ endforeach
 core_plugins = []
 vendor_plugins = []
 disabled_plugins = []
+plugin_subdirs = {}
+foreach def : plugin_defs
+  plugin_subdirs += {def['dir']: def['subdir']}
+endforeach
 foreach plugin_name : all_plugin_names
   if plugin_name in enabled_plugins
     is_core = false
+    plugin_subdir = plugin_subdirs.get(plugin_name, plugin_name)
     foreach src : plugin_sources
-      if src.startswith('plugins/' + plugin_name + '/') and fs.read(meson.project_source_root() / src).contains('.core = true')
+      if src.startswith('plugins/' + plugin_subdir + '/') and fs.read(meson.project_source_root() / src).contains('.core = true')
         is_core = true
       endif
     endforeach
