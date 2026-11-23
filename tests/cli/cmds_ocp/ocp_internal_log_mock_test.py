@@ -39,20 +39,20 @@ Tests in this module verify:
     log and the built-in table, string log tables and ASCII strings that
     do not lie within the string log left unread, a later entry naming
     an identifier whose first entry cannot be read, the bad block
-    statistics and one too short for its fields, and the end-of-list
-    identifier.
+    statistics and one too short for its fields.
   * The statistics walk: statistics of different sizes and of none, the
-    statistics size bounding it, a statistic running past that size
-    being reported, and statistics running past the end of the log being
-    rejected.
+    statistics size bounding it, zero Dwords between statistics skipped
+    as padding, a statistic running past that size or with the reserved
+    identifier 0000h being reported, and statistics running past the end
+    of the log being rejected.
   * Context Statistic Descriptors (6Dh, 6Eh, 6Fh, and any statistic with
     the Context Index flag): the context data and each type's scope
     fields, the encapsulated statistics as records of their own, an
     invalid Context Data Size reported without changing where they
     start, a container too small for its context data, containers that
-    nest, encapsulated statistics running past their container, and the
-    end-of-list identifier inside one. Two containers are checked
-    against a customer's example report, field for field.
+    nest, encapsulated statistics running past their container, and zero
+    padding inside one being reported once and skipped. Two containers
+    are checked against a customer's example report, field for field.
   * Option handling: fetching a controller log the drive does not
     support failing, log files decoded without querying the drive, -t
     taken from a log file's ID and checked against it, the log
@@ -1130,17 +1130,33 @@ class TestInternalLogStatistics(OCPInternalLogTestBase):
                                        [expected, XOR_RECOVERY_EXPECTED],
                                        errors=[error])
 
-    def test_identifier_zero_ends_the_encapsulated_list(self):
+    def test_zero_padding_inside_a_context_is_reported_once(self):
+        """A Context Statistic Descriptor holds only its context data and
+        encapsulated descriptors (STATI-112), so all-zero Dwords inside
+        one are reported, once however many runs there are, and skipped;
+        the descriptors after them still decode."""
         stat_id = layout.STAT_QUEUE_ID_CONTEXT
+        where = ('Encapsulated Statistic Descriptors of Context Statistic '
+                 '0x6f')
         stat = layout.context_statistic(
             stat_id, CONTEXTS[stat_id],
-            [INNER[0], layout.statistic(0), INNER[1]])
+            [INNER[0], bytes(layout.DWORD), INNER[1],
+             bytes(2 * layout.DWORD)])
         expected = context_expected(stat_id, CONTEXT_NAMES[stat_id],
-                                    CONTEXTS[stat_id], [INNER_EXPECTED[0]])
+                                    CONTEXTS[stat_id], INNER_EXPECTED)
         expected['Statistic Data Size'] = \
             f'0x{(len(stat) - layout.STAT_DESCRIPTOR_SIZE) // 4:x}'
+        error = (f'Invalid statistic at offset 0xc of {where}: zero padding '
+                 'inside a Context Statistic Descriptor')
         self.assert_statistics([stat, XOR_RECOVERY],
-                               [expected, XOR_RECOVERY_EXPECTED])
+                               [expected, XOR_RECOVERY_EXPECTED],
+                               errors=[error])
+        telemetry = layout.pack_telemetry(da1_stats=[stat, XOR_RECOVERY])
+        for mode in MODES:
+            with self.subTest(mode=mode, check='reported once'):
+                _, output = self.statistics_with_output(
+                    telemetry, layout.pack_string_log(), mode=mode)
+                self.assertEqual(output.count('zero padding'), 1, output)
 
     def test_statistic_without_data(self):
         """A Statistic Data Size of 0 leaves just the descriptor, and the
@@ -1216,12 +1232,32 @@ class TestInternalLogStatistics(OCPInternalLogTestBase):
                                                 layout.pack_string_log(),
                                                 mode=mode))
 
-    def test_identifier_zero_ends_the_list(self):
-        self.assert_statistics(
-            [layout.statistic(0x01, bytes(4)), layout.statistic(0),
-             layout.statistic(0x02, bytes(4))],
-            [{**stat_expected(0x01, 'Outstanding Admin Commands', 1),
-              'Statistic Specific Data': '00000000'}])
+    def test_zero_dwords_between_statistics_are_skipped(self):
+        """All-zero Dwords where a statistic would start are padding, in
+        any number, including one that is not a whole descriptor: they are
+        skipped without a report, up to the statistics size."""
+        pad = bytes(layout.DWORD)
+        for pad_dw in (1, 2, 3):
+            with self.subTest(pad_dw=pad_dw):
+                self.assert_statistics(
+                    [pad, layout.statistic(0x01, bytes(4)), pad * pad_dw,
+                     layout.statistic(0x02, bytes(4)), pad * 2],
+                    [leaf_expected(0x01, 'Outstanding Admin Commands',
+                                   bytes(4)),
+                     leaf_expected(0x02, 'Host Write Bandwidth', bytes(4))])
+
+    def test_reserved_identifier_ends_the_list(self):
+        """A descriptor with the reserved Statistic Identifier 0000h that
+        is not zero padding is reported and ends the list."""
+        error = ('Invalid statistic at offset 0x10 of Data Area 1: '
+                 'Statistic Identifier 0000h is reserved')
+        for field, value in (('behavior', 1), ('nsid', 3)):
+            with self.subTest(field=field):
+                self.assert_statistics(
+                    [XOR_RECOVERY,
+                     layout.statistic(0, bytes(4), **{field: value}),
+                     layout.statistic(0x01, bytes(4))],
+                    [XOR_RECOVERY_EXPECTED], errors=[error])
 
     def test_no_statistics(self):
         self.assert_statistics([], [])

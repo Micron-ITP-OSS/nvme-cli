@@ -1730,10 +1730,10 @@ int parse_event_fifos(const struct ocp_telemetry_logs *logs,
 			__u64 fifo_offset, fifo_size;
 			__u8 *pfifo_start = NULL;
 
-			if (!size_dw || start_dw > da_dw || size_dw > da_dw - start_dw) {
+			if (start_dw > da_dw || size_dw > da_dw - start_dw) {
 				nvme_show_error(
-					"Invalid FIFO bounds for FIFO %d",
-					fifo_no);
+					"Invalid FIFO bounds for Event FIFO %d",
+					fifo_no + 1);
 				return -1;
 			}
 			fifo_offset = start_dw * SIZE_OF_DWORD;
@@ -2010,8 +2010,11 @@ out:
 }
 
 /*
- * Prints the statistic descriptors in the @size bytes at @pstats, up to the
- * first reserved identifier or the first descriptor that does not fit.
+ * Prints the statistic descriptors in the @size bytes at @pstats, up to
+ * @size or the first descriptor that is invalid or does not fit. An
+ * all-zero Dword where a descriptor would start is padding. A Context
+ * Statistic Descriptor holds only its context data and encapsulated
+ * descriptors (STATI-112), so padding inside one is reported, once.
  */
 static void print_statistics(const struct ocp_telemetry_logs *logs,
 			     __u8 *pstats, unsigned int size,
@@ -2020,17 +2023,33 @@ static void print_statistics(const struct ocp_telemetry_logs *logs,
 {
 	struct nvme_ocp_telemetry_statistic_descriptor *pstatistic_entry;
 	unsigned int offset = 0, left, data_size;
+	bool padding_reported = false;
 	__u16 id;
 
-	/* Sizes are in Dwords, so the identifier always fits */
+	/* Sizes are in Dwords, so a whole Dword is always left */
 	while (offset < size) {
 		pstatistic_entry = (struct nvme_ocp_telemetry_statistic_descriptor *)
 			(pstats + offset);
 		id = le16_to_cpu(pstatistic_entry->statistic_id);
 		left = size - offset;
 
-		if (id == STATISTICS_RESERVED_ID)
+		if (id == STATISTICS_RESERVED_ID &&
+		    !pstats[offset + 2] && !pstats[offset + 3]) {
+			if (encapsulated && !padding_reported) {
+				nvme_show_error(
+					"Invalid statistic at offset 0x%x of %s: zero padding inside a Context Statistic Descriptor",
+					offset, where);
+				padding_reported = true;
+			}
+			offset += SIZE_OF_DWORD;
+			continue;
+		}
+		if (id == STATISTICS_RESERVED_ID) {
+			nvme_show_error(
+				"Invalid statistic at offset 0x%x of %s: Statistic Identifier 0000h is reserved",
+				offset, where);
 			break;
+		}
 		if (left < sizeof(*pstatistic_entry)) {
 			nvme_show_error("Invalid statistic at offset 0x%x of %s: "
 					"descriptor needs %zu bytes, %u left",
