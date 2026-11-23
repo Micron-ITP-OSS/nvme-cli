@@ -629,7 +629,12 @@ def is_context_statistic(stat_id: int, context_index: bool) -> bool:
 
 def _walk_statistics(area: bytes, nested: bool) -> Iterator[Statistic]:
     offset = 0
-    while offset + STAT_DESCRIPTOR_SIZE <= len(area):
+    while offset + DWORD <= len(area):
+        if area[offset:offset + DWORD] == bytes(DWORD):
+            offset += DWORD
+            continue
+        if offset + STAT_DESCRIPTOR_SIZE > len(area):
+            return
         stat_id, info, _, size_dw, _ = struct.unpack_from(_STAT_DESCRIPTOR,
                                                           area, offset)
         start = offset + STAT_DESCRIPTOR_SIZE
@@ -649,7 +654,9 @@ def _walk_statistics(area: bytes, nested: bool) -> Iterator[Statistic]:
 
 def iter_statistics(telemetry: bytes, da: int) -> Iterator[Statistic]:
     """Walk the statistics of Data Area @da (1 or 2) as the OCP header
-    places them, up to their declared size or the first identifier 0.
+    places them, up to their declared size or the first identifier 0
+    that is not padding. An all-zero Dword where a descriptor would start
+    is padding, and is skipped.
 
     A Context Statistic Descriptor's encapsulated descriptors come out
     in its @encapsulated; they do not nest further."""
