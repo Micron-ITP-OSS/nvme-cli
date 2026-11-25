@@ -21,14 +21,15 @@ struct kmip_job {
 	char *keyring;		// NULL: .nvme
 	char *hostnqn;
 	char *subsysnqn;
-	char *name;		// the KMIP Name, from tls-key
+	char *name;		// the KMIP Name, from tls-key or kxchap-*
+	bool kxchap;		// a KX-HMAC-CHAP secret, not a PSK
 	const struct keysd_kmip *kms;
 };
 
 /*
  * Return true if an entry of the fabrics configuration @fabrics_conf (NULL
- * for the default) has a key source other than "inline". Without such an
- * entry, import_keys() has nothing to do.
+ * for the default) has a tls-key-source or kxchap-secret-source other than
+ * "inline". Without such an entry, import_keys() has nothing to do.
  */
 bool import_needed(struct libnvme_global_ctx *ctx, const char *fabrics_conf);
 
@@ -47,6 +48,9 @@ void import_free(struct import_ctx *ic);
  * host NQN and subsystem NQN is revoked, so the kernel's lookup by NQNs
  * finds only this one.
  *
+ * Put every KX-HMAC-CHAP secret that comes from a systemd credential into
+ * its keyring, as a "dhchap" key whose description is the credential name.
+ *
  * The keys that come from a KMS are only collected: see
  * import_kmip_jobs().
  */
@@ -56,8 +60,9 @@ void import_keys(struct import_ctx *ic, const char *fabrics_conf);
 size_t import_kmip_jobs(struct import_ctx *ic, const struct kmip_job **jobs);
 
 /*
- * Put the PSK @encoded, in the interchange format, from the KMS of @job
- * into its keyring, as import_keys() does. Returns 0 or a negative errno.
+ * Put the key @encoded from the KMS of @job into its keyring, as
+ * import_keys() does: a PSK in the interchange format, or a KX-HMAC-CHAP
+ * secret. Returns 0 or a negative errno.
  */
-int import_kmip_psk(struct import_ctx *ic, const struct kmip_job *job,
+int import_kmip_key(struct import_ctx *ic, const struct kmip_job *job,
 		const char *encoded);

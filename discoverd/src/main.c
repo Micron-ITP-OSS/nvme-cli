@@ -52,12 +52,10 @@
 #include "units.h"
 
 // Exponential backoff for failed (re)connect attempts: 1s, 2s, 4s, ... capped
-// at 5 min. A dynamically-discovered DC (not NBFT- or config-sourced — a
-// referral or FC-kickstart find) additionally gives up after
-// dc-giveup-timeout (default 72hours) of unbroken failure and is dropped
-// from tracking, since nothing but its own retries vouches for it any more.
-// Static and NBFT-sourced DCs represent deliberate admin/firmware intent
-// and always retry forever.
+// at 5 min. A DC found only through mDNS or FC kickstart additionally gives
+// up after dc-giveup-timeout (default 72hours) of unbroken failure and is
+// dropped from tracking: no admin asked for it. Everything an admin asked
+// for retries forever: the NBFT, the configuration, and what a DLP lists.
 #define RETRY_INITIAL_DELAY_SEC 1
 #define RETRY_MAX_DELAY_SEC     300
 
@@ -74,6 +72,11 @@ struct active_ctrl {
 	unsigned int attempts;   // consecutive failed (re)connect attempts
 	uint64_t giveup_at_usec; // 0 = no deadline armed (ctrl_arm_giveup)
 	sd_event_source *retry_timer; // NULL when no retry pending
+
+	// The NCC bit of this IOC's DLP entry, at the last read of the DLP.
+	bool ncc;
+	// Retries stopped for NCC, until NCC is cleared (ncc_stop()).
+	bool ncc_stopped;
 
 	/*
 	 * EPCSD this DC's own referral entry carried in its parent's
@@ -786,7 +789,37 @@ struct dlp_fetch_ctx {
 	bool epcsd; // meaningful only if self_seen
 };
 
-static void dlp_ioc_callback(const struct libnvmf_tid *t, void *user_data)
+static int schedule_retry(struct active_ctrl *e);
+
+/*
+ * Record the NCC bit of @t's entry in a DLP. A cleared NCC means the CDC
+ * is connected to the subsystem again, so retry @t if it stopped for NCC.
+ * A no-op if @t is not tracked.
+ */
+static void record_ncc(const struct libnvmf_tid *t, bool ncc)
+{
+	__cleanup_free char *unit_name = tid_unit_name(t);
+	struct active_ctrl *e;
+
+	if (!unit_name)
+		return;
+	e = ctrl_find_by_unit(unit_name);
+	if (!e)
+		return;
+
+	e->ncc = ncc;
+	if (ncc || !e->ncc_stopped)
+		return;
+
+	log_info("%s - NCC cleared, trying again", libnvmf_tid_str(t));
+	e->ncc_stopped = false;
+	e->attempts = 0;
+	if (schedule_retry(e) < 0)
+		log_err("%s - failed to schedule retry", libnvmf_tid_str(t));
+}
+
+static void dlp_ioc_callback(const struct libnvmf_tid *t, bool ncc,
+			     void *user_data)
 {
 	struct dlp_fetch_ctx *fctx = user_data;
 	struct libnvmf_tid *dup;
@@ -799,6 +832,7 @@ static void dlp_ioc_callback(const struct libnvmf_tid *t, void *user_data)
 
 	if (should_connect(fctx->scan, t, NULL, fctx->owner))
 		start_ctrl(t, false, fctx->owner, fctx->via_dc);
+	record_ncc(t, ncc);
 }
 
 /*
@@ -979,10 +1013,11 @@ static void dlp_fetch(struct active_ctrl *e)
 }
 
 /*
- * Arm a dynamically-discovered DC's give-up deadline the first time it is
- * seen failing to (re)connect. Static/NBFT-sourced DCs and IOCs never get
- * one and retry forever, and so does a dynamic DC when dc-giveup-timeout
- * is configured to infinity.
+ * Arm the give-up deadline of a DC found only through mDNS or FC kickstart
+ * the first time it is seen failing to (re)connect. Other DCs and IOCs
+ * never get one and retry forever, and so does such a DC when
+ * dc-giveup-timeout is configured to infinity. A referral needs none: it
+ * follows the DC that lists it.
  *
  * Note the two distinct zeros: giveup_at_usec == 0 means no deadline is
  * armed, while a dc-giveup-timeout of 0 means give up on the first
@@ -994,8 +1029,7 @@ static void ctrl_arm_giveup(struct active_ctrl *e)
 
 	if (e->giveup_at_usec || !e->is_dc)
 		return;
-	if (inventory_is_pre_os(ctx.inventory, e->tid) ||
-	    inventory_config_conn_for(ctx.inventory, e->tid))
+	if (!inventory_is_discovered_only(ctx.inventory, e->tid))
 		return;
 	if (ctx.cfg->dc_giveup_timeout_usec == SHR_USEC_INFINITY)
 		return;
@@ -1022,6 +1056,26 @@ static uint64_t backoff_delay_usec(unsigned int attempts)
 	return sec * UINT64_C(1000000);
 }
 
+/*
+ * Whether to stop retrying the IOC @e after its last failure: its DLP
+ * entry has NCC set, and connect-attempts-on-ncc attempts failed. A CDC
+ * sets NCC while it has no connection to the subsystem, and clears it
+ * when it has one again (see record_ncc()). The NBFT, pre-os.conf and the
+ * configuration ask for the IOC themselves: those never stop.
+ */
+static bool ncc_stop(const struct active_ctrl *e)
+{
+	unsigned int max = ctx.cfg->connect_attempts_on_ncc;
+
+	if (e->is_dc || !e->ncc || !max)
+		return false;
+	if (inventory_is_pre_os(ctx.inventory, e->tid) ||
+	    inventory_config_conn_for(ctx.inventory, e->tid))
+		return false;
+
+	return e->attempts + 1 >= max;
+}
+
 static int retry_timeout(sd_event_source *src, uint64_t usec, void *user_data);
 
 static int schedule_retry(struct active_ctrl *e)
@@ -1031,6 +1085,13 @@ static int schedule_retry(struct active_ctrl *e)
 
 	if (e->retry_timer)
 		return 0; // already scheduled
+
+	if (ncc_stop(e)) {
+		log_info("%s - NCC set, stopping after %u attempts",
+			 libnvmf_tid_str(e->tid), e->attempts + 1);
+		e->ncc_stopped = true;
+		return 0;
+	}
 
 	ctrl_arm_giveup(e);
 
@@ -1229,6 +1290,7 @@ static void on_job_done(const char *unit_name, bool success,
 	if (success) {
 		e->attempts = 0;
 		e->giveup_at_usec = 0;
+		e->ncc_stopped = false;
 
 		/*
 		 * The device's add event is soaked for about a second and
@@ -1868,6 +1930,8 @@ static void on_control_dump(FILE *f, void *user_data __attribute__((unused)))
 		json_bool(f, "dlp_fetched", e->dlp_fetched);
 		fprintf(f, ",\"attempts\":%u", e->attempts);
 		json_bool(f, "retry_pending", e->retry_timer);
+		json_bool(f, "ncc", e->ncc);
+		json_bool(f, "ncc_stopped", e->ncc_stopped);
 		json_bool(f, "epcsd_parked", e->epcsd_poll_timer);
 		fputc('}', f);
 	}
