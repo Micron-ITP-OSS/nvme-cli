@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: GPL-2.0-only -->
-# Building nvme-cli and libnvme
+# Building nvme-cli
 
 nvme-cli uses meson as its build system. There is more than one way to configure and
 build the project to accommodate environments with an older version of meson.
@@ -17,6 +17,32 @@ to build the project using [samurai](https://github.com/michaelforney/samurai)
 and [muon](https://github.com/annacrombie/muon). Both build tools have only a
 minimal dependency on the build environment. To ease this step, there is a build
 script which helps to setup a build environment.
+
+## Quick start
+
+```shell
+$ meson setup .build
+$ meson compile -C .build
+# meson install -C .build
+```
+
+By default this installs under `/usr/local`, see
+[Installation paths](#installation-paths). Since nvme-cli 3.2, nvme-cli also
+builds and runs on FreeBSD. PCIe devices work through the nvme(4) driver.
+NVMe-oF, NVMe-MI, nvme-discoverd and `nvme top` are not available there yet.
+
+## Pre-built static binaries
+
+You do not have to build nvme-cli yourself to test it. Static x86_64
+binaries are available on the
+[releases page](https://github.com/linux-nvme/nvme-cli/releases):
+
+- `nightly`: a pre-release with a static Linux build of the latest master
+  commit. It is updated on every push to master.
+  Direct link:
+  [nvme-cli-latest-x86_64](https://github.com/linux-nvme/nvme-cli/releases/download/nightly/nvme-cli-latest-x86_64).
+- Since v3.2: each release has a static Linux binary and a Windows binary
+  attached.
 
 ## nvme-cli dependencies (3.x and later)
 
@@ -63,11 +89,66 @@ Example: explicitly disable Python bindings:
 $ meson setup .build -Dpython=disabled
 ```
 
-Options specific to nvme-cli are defined in [`meson_options.txt`](../meson_options.txt).
+Options specific to nvme-cli are defined in [`meson_options.txt`](https://github.com/linux-nvme/nvme-cli/blob/master/meson_options.txt).
 To see the full list of available options, including meson built-ins:
 
 ```shell
 $ meson configure .build
+```
+
+## Dependencies per distribution
+
+
+### Fedora
+
+```shell
+# dnf install json-c-devel openssl-devel keyutils-libs-devel dbus-devel python3-devel
+```
+
+### CentOS Stream 9
+
+```shell
+$ dnf config-manager --set-enabled powertools
+$ dnf search glibc
+$ dnf provides */libc.a
+$ dnf install glibc-static
+```
+
+### Ubuntu 24.04
+
+Dependencies if using meson directly:
+
+```shell
+$ sudo apt install gcc make git
+$ sudo pip3 install meson
+$ sudo apt-get install python3 python3-pip python3-setuptools python3-wheel ninja-build
+$ sudo apt install cmake swig libjson-c-dev libssl-dev libkeyutils-dev pkg-config
+```
+
+### SUSE Linux Enterprise 15 Service Pack 7
+
+```shell
+# zypper install git meson gcc libjson-c-devel keyutils-devel openssl-devel
+```
+
+### EOL distributions
+
+These are unsupported for the muon minimal build, but are included here for
+reference:
+
+**CentOS 8**
+
+```shell
+$ dnf config-manager --set-enabled powertools
+$ dnf search glibc
+$ dnf provides */libc.a
+$ dnf install glibc-static
+```
+
+**CentOS 7**
+
+```shell
+$ yum install glibc-static
 ```
 
 ## Daemons and systemd
